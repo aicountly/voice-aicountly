@@ -83,6 +83,15 @@ final class Context
 
         $result = (new ManageClient())->withSession($auth->sesKey())->companyInfo($this->cmpId);
 
+        // Manage answering "no" and Manage not answering are different facts
+        // and must produce different answers. A definitive refusal is a 403 the
+        // user can act on; an unreachable Manage is a 503 they should retry.
+        // Collapsing them tells somebody to try again at a door that will never
+        // open, and hides a genuine outage behind a permissions message.
+        if (!$result['ok'] && in_array($result['status'], [401, 403, 404], true)) {
+            Http::forbidden('You do not have access to this company.');
+        }
+
         if (!$result['ok']) {
             // Unreachable is not "allowed". A tenant check that fails open is
             // not a tenant check.
