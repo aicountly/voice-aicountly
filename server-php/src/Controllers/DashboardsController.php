@@ -45,7 +45,7 @@ final class DashboardsController extends Controller
         [$class, $permission] = $definition;
         [$auth, $ctx] = self::enter($permission);
 
-        $period = Period::fromRequest();
+        $period = Period::fromRequest($ctx, 'today');
         /** @var \Aicountly\Api\Dashboards\Dashboard $dashboard */
         $dashboard = new $class($ctx, $auth, $period);
 

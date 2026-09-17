@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Aicountly\Api\Dashboards;
 
-use Aicountly\Api\Domain\Settings;
+use Aicountly\Api\Settings;
 use Aicountly\Api\Http;
 use Aicountly\Api\Support\Clock;
 use DateTimeImmutable;
@@ -56,7 +56,7 @@ final class Period
     /** Read the period off the request, in the company's own timezone. */
     public static function fromRequest(\Aicountly\Api\Context $ctx, string $default = '30d'): self
     {
-        $settings = Settings::for($ctx);
+        $settings = Settings::forCompany($ctx->cmpId);
         $zone = Clock::zone($settings['timezone']);
 
         $preset = strtolower(trim((string) (Http::param('period') ?? $default)));
@@ -83,7 +83,7 @@ final class Period
     /** Today, in the company's timezone. What the Overview and Live dashboards run on. */
     public static function today(\Aicountly\Api\Context $ctx): self
     {
-        $settings = Settings::for($ctx);
+        $settings = Settings::forCompany($ctx->cmpId);
         $zone = Clock::zone($settings['timezone']);
         $now = Clock::now();
         $from = Clock::startOfLocalDay($now, $zone);

@@ -59,6 +59,35 @@ if ($path === 'health') {
 }
 
 // ---------------------------------------------------------------------------
+// Portal — my.aicountly.com's auth surface
+// ---------------------------------------------------------------------------
+// Stands in for the portal so the app can be exercised without a real sign-in.
+// It authenticates nothing: it hands back a fixed session for any bearer token.
+// That is fine here and would be catastrophic anywhere else, which is why it
+// lives in tests/ and is reachable only through PORTAL_AUTH_BASE.
+if ($path === 'seskey' || $path === 'seskey/refresh') {
+    stub_json(200, ['status' => 1, 'ses_key' => 'stub-ses-key', 'expires_in' => 900]);
+}
+
+if ($path === 'validatesession') {
+    stub_json(200, [
+        'status'      => 1,
+        'uuid_aictly' => 'stub-user-uuid',
+        'name'        => 'Demo Operator',
+        'email'       => 'demo@example.invalid',
+        // acs_type 1 is a company owner, so the walkthrough sees every screen.
+        'acs_type'    => 1,
+    ]);
+}
+
+if ($path === 'companies') {
+    stub_json(200, ['data' => [
+        ['cmp_id' => 4001, 'name' => 'Acme Enterprises', 'is_creator' => 1],
+        ['cmp_id' => 4002, 'name' => 'Northwind Services', 'is_creator' => 1],
+    ]]);
+}
+
+// ---------------------------------------------------------------------------
 // Manage — the tenant check
 // ---------------------------------------------------------------------------
 if (str_starts_with($path, 'companyinfo')) {

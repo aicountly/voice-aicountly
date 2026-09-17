@@ -1,0 +1,144 @@
+/**
+ * The application frame: sidebar, top bar, page body.
+ *
+ * On a phone the sidebar becomes a horizontal scroller at the top, because a
+ * hamburger that hides the whole navigation on an operations tool means two
+ * taps to reach the queue while somebody is waiting on the line.
+ */
+
+.vshell {
+  display: grid;
+  grid-template-columns: 244px minmax(0, 1fr);
+  min-height: 100dvh;
+}
+
+.vsidebar {
+  position: sticky; top: 0; height: 100dvh;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  padding: 24px 14px;
+  display: flex; flex-direction: column;
+  overflow-y: auto;
+}
+
+.vbrand {
+  display: flex; gap: 11px; align-items: center;
+  text-decoration: none; padding: 0 10px 24px;
+}
+.vbrand__mark {
+  width: 40px; height: 40px; display: grid; place-items: center;
+  border-radius: 12px; color: #fff; background: var(--primary); flex-shrink: 0;
+}
+.vbrand__name { display: block; font-size: 22px; font-weight: 750; letter-spacing: -.7px; line-height: 1; }
+.vbrand__sub { display: block; color: var(--primary); letter-spacing: 3px; font-size: 10px; font-weight: 700; margin-top: 3px; }
+
+.vnav-caption {
+  color: var(--muted); font-size: 10px; letter-spacing: 1.4px;
+  font-weight: 700; padding: 0 0 8px 12px; margin: 0;
+}
+
+.vnav { display: grid; gap: 3px; }
+.vnav a {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; border-radius: 10px; text-decoration: none;
+  color: var(--muted); font-size: 13px; font-weight: 600;
+  transition: background .12s ease, color .12s ease;
+}
+.vnav a:hover { background: #f5f9f6; color: var(--text); }
+.vnav a[aria-current='page'] { background: var(--mint); color: var(--primary-dark); }
+.vnav__separator { height: 1px; background: var(--border); margin: 12px 8px; }
+
+.vsidebar__foot { margin-top: auto; padding-top: 18px; }
+.vsidebar__note {
+  padding: 13px; border-radius: 12px; background: #f5f9f6;
+  border: 1px solid #e6eee9; font-size: 11px; color: var(--muted);
+}
+
+.vmain { min-width: 0; display: flex; flex-direction: column; }
+
+.vtopbar {
+  display: flex; gap: 14px; align-items: center;
+  min-height: 74px; padding: 14px 28px;
+  border-bottom: 1px solid var(--border);
+  background: #ffffffc4;
+  backdrop-filter: blur(8px);
+  position: sticky; top: 0; z-index: 20;
+}
+
+.vsearch { flex: 1; max-width: 560px; position: relative; }
+.vsearch input {
+  width: 100%; background: #f7faf8; border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px 12px 10px 36px; min-height: 40px;
+}
+.vsearch__icon {
+  position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
+  color: var(--muted); pointer-events: none;
+}
+
+.vcontext {
+  display: flex; gap: 8px; align-items: center;
+}
+.vcontext select {
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 9px 11px; background: var(--surface); font-weight: 600; font-size: 13px;
+  max-width: 220px; min-height: 40px;
+}
+
+.vavatar {
+  border: 0; border-radius: 50%; width: 38px; height: 38px;
+  background: var(--primary-dark); color: #fff; font-weight: 700; font-size: 13px;
+  display: grid; place-items: center; flex-shrink: 0;
+}
+
+.vbell { position: relative; }
+.vbell__dot {
+  position: absolute; top: 6px; right: 6px;
+  width: 7px; height: 7px; border-radius: 50%; background: var(--danger);
+}
+
+.vpage { padding: 28px; max-width: 1840px; margin: 0 auto; width: 100%; flex: 1; }
+.vpage__head {
+  display: flex; justify-content: space-between; gap: 20px;
+  align-items: flex-start; margin-bottom: 24px; flex-wrap: wrap;
+}
+.vpage__eyebrow {
+  color: var(--muted); font-size: 10px; letter-spacing: 1.4px;
+  font-weight: 700; margin: 0 0 6px;
+}
+.vpage__title { margin-bottom: 4px; }
+.vpage__subtitle { color: var(--muted); font-size: 14px; margin: 0; }
+.vpage__actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+.vdemo-banner {
+  background: #fff8ec; border-bottom: 1px solid #f2e0bd;
+  color: var(--warning); font-size: 12px; font-weight: 600;
+  padding: 8px 28px; display: flex; gap: 8px; align-items: center;
+}
+
+@media (max-width: 1240px) {
+  .vshell { grid-template-columns: 212px minmax(0, 1fr); }
+  .vpage, .vtopbar { padding-left: 20px; padding-right: 20px; }
+}
+
+@media (max-width: 900px) {
+  .vshell { display: block; }
+  .vsidebar {
+    position: static; height: auto; padding: 14px 16px;
+    border-right: 0; border-bottom: 1px solid var(--border);
+  }
+  .vbrand { padding: 0 0 12px; }
+  .vnav-caption, .vsidebar__foot { display: none; }
+  /* A horizontal scroller, not a hamburger: an operations tool must not hide
+     the queue behind a menu while somebody is waiting. */
+  .vnav { display: flex; overflow-x: auto; gap: 6px; padding-bottom: 4px; }
+  .vnav a { white-space: nowrap; }
+  .vnav__separator { display: none; }
+  .vtopbar { flex-wrap: wrap; min-height: 0; padding: 12px 16px; }
+  .vsearch { order: 3; flex-basis: 100%; max-width: none; }
+  .vpage { padding: 16px; }
+}
+
+@media (max-width: 560px) {
+  .vcontext select { max-width: 150px; }
+  .vpage__head { flex-direction: column; align-items: stretch; }
+}

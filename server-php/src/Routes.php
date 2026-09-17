@@ -9,6 +9,7 @@ use Aicountly\Api\Controllers\CallbacksController;
 use Aicountly\Api\Controllers\CallFlowsController;
 use Aicountly\Api\Controllers\CallsController;
 use Aicountly\Api\Controllers\CampaignsController;
+use Aicountly\Api\Controllers\CompaniesController;
 use Aicountly\Api\Controllers\ContactsController;
 use Aicountly\Api\Controllers\DashboardsController;
 use Aicountly\Api\Controllers\EventsController;
@@ -41,6 +42,13 @@ final class Routes
         // provider's own signature against the connection named in the path.
         // See WebhooksController.
         $router->post('/webhooks/telephony/{connectionId}', [WebhooksController::class, 'telephony']);
+
+        // -------------------------------------------------------------------
+        // The company switcher — the one authenticated route with no company
+        // scope, because you cannot name a company in order to list companies.
+        // Served from Manage, live. See CompaniesController.
+        // -------------------------------------------------------------------
+        $router->get('/v1/companies', [CompaniesController::class, 'index']);
 
         // -------------------------------------------------------------------
         // Dashboards

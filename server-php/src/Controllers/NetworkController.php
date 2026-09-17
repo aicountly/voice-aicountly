@@ -39,7 +39,7 @@ final class NetworkController extends Controller
     {
         [, $ctx] = self::enter('voice.reports.view');
 
-        $period = \Aicountly\Api\Dashboards\Period::fromRequest();
+        $period = \Aicountly\Api\Dashboards\Period::fromRequest($ctx, '30d');
 
         Http::data(UsageService::breakdown(
             $ctx,

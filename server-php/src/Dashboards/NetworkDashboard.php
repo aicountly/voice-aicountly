@@ -125,7 +125,9 @@ final class NetworkDashboard extends Dashboard
                 COUNT(*)                                           AS samples
                FROM voice_call_events
               WHERE cmp_id = :cmp AND received_at >= :from AND received_at < :to
-                AND payload ? \'media_latency_ms\'',
+                -- jsonb_exists(), not the ? operator: PDO reads a bare ? as a
+                -- positional placeholder and refuses to mix it with named ones.
+                AND jsonb_exists(payload, \'media_latency_ms\')',
             ['cmp' => $this->ctx->cmpId, 'from' => $fromIso, 'to' => $toIso],
         ) ?? [];
 
