@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Aicountly Voice — Design Reference</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Application navigation">
+      <a class="brand" href="#command">
+        <span class="brand-mark" aria-hidden="true">◖</span>
+        <span><strong>aicountly</strong><small>VOICE</small></span>
+      </a>
+      <p class="nav-caption">WORKSPACES</p>
+      <nav id="dashboard-nav" aria-label="Dashboards">
+        <a href="#command" data-view="command">Command Centre</a>
+        <a href="#live" data-view="live">Live Operations</a>
+        <a href="#studio" data-view="studio">AI Voice Studio</a>
+        <a href="#campaigns" data-view="campaigns">Campaigns &amp; Growth</a>
+        <a href="#intelligence" data-view="intelligence">
+          Conversation Intelligence
+        </a>
+        <a href="#network" data-view="network">Network &amp; Usage</a>
+      </nav>
+      <div class="sidebar-note">
+        <span class="status-dot" aria-hidden="true"></span>
+        Design reference · Sample data
+      </div>
+    </aside>
+
+    <div class="main-shell">
+      <header class="topbar">
+        <label class="sr-only" for="company">Company</label>
+        <select id="company">
+          <option>Acme Enterprises · Demo</option>
+        </select>
+        <label class="search-field">
+          <span class="sr-only">Search this reference</span>
+          <input id="global-search" type="search"
+            placeholder="Search calls, contacts, transcripts">
+        </label>
+        <span class="badge neutral">Demo workspace</span>
+        <button class="avatar" data-demo="User profile"
+          aria-label="Open user profile">RG</button>
+      </header>
+
+      <main id="main" tabindex="-1">
+        <header class="page-heading">
+          <div>
+            <p class="eyebrow">AICOUNTLY VOICE</p>
+            <h1 id="page-title"></h1>
+            <p id="page-subtitle" class="muted"></p>
+          </div>
+          <button id="primary-action" class="button primary"></button>
+        </header>
+        <section id="metrics" class="metrics" aria-label="Key metrics">
+        </section>
+        <div id="dashboard-content"></div>
+        <footer class="page-footer">
+          Illustrative data · Static design reference · Asia/Kolkata
+        </footer>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="demo-dialog" aria-labelledby="dialog-title">
+    <h2 id="dialog-title">Reference interaction</h2>
+    <p id="dialog-copy"></p>
+    <form method="dialog">
+      <button class="button primary">Close</button>
+    </form>
+  </dialog>
+</body>
+</html>
