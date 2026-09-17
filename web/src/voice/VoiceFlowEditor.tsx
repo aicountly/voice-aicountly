@@ -43,10 +43,24 @@ const NODE_LABELS: Record<string, string> = {
 const TERMINAL = ['end_call', 'voicemail', 'handover']
 const NEEDS_TIMEOUT = ['intent', 'dtmf_input', 'confirm']
 
+/**
+ * A definition that is safe to walk.
+ *
+ * Defensive on purpose. A jsonb column that reaches the browser as a string,
+ * or a version with no nodes yet, would otherwise throw inside the layout and
+ * blank the whole screen — and a blank screen tells the person looking at it
+ * nothing at all. An empty flow renders as an empty flow.
+ */
+function safeDefinition(input: FlowDefinition | null | undefined): FlowDefinition {
+  if (!input || typeof input !== 'object') return { entry: '', nodes: {} }
+  const nodes = input.nodes && typeof input.nodes === 'object' ? input.nodes : {}
+  return { entry: typeof input.entry === 'string' ? input.entry : '', nodes }
+}
+
 export function VoiceFlowEditor({
-  definition, validation, nodeTypes, actions, onChange, readOnly,
+  definition: rawDefinition, validation, nodeTypes, actions, onChange, readOnly,
 }: {
-  definition: FlowDefinition
+  definition: FlowDefinition | null
   validation: FlowValidation | null
   nodeTypes: string[]
   /** Action keys the agent may take, from the server's allowlist. */
@@ -54,6 +68,7 @@ export function VoiceFlowEditor({
   onChange: (next: FlowDefinition) => void
   readOnly?: boolean
 }) {
+  const definition = useMemo(() => safeDefinition(rawDefinition), [rawDefinition])
   const [selected, setSelected] = useState<string | null>(definition.entry || null)
 
   const order = useMemo(() => layout(definition), [definition])
@@ -365,20 +380,23 @@ function NodeForm({
 }
 
 function ValidationSummary({ validation }: { validation: FlowValidation }) {
-  if (validation.valid && validation.warnings.length === 0) {
+  const errors = Array.isArray(validation.errors) ? validation.errors : []
+  const warnings = Array.isArray(validation.warnings) ? validation.warnings : []
+
+  if (validation.valid && warnings.length === 0) {
     return (
       <Notice tone="info" title="This flow is executable">
-        <p>{validation.checked} steps checked, nothing outstanding.</p>
+        <p>{validation.checked ?? 0} steps checked, nothing outstanding.</p>
       </Notice>
     )
   }
 
   return (
     <div className="vstack vstack--tight">
-      {validation.errors.length > 0 ? (
-        <Notice tone="danger" title={`${validation.errors.length} ${validation.errors.length === 1 ? 'problem' : 'problems'} blocking publication`}>
+      {errors.length > 0 ? (
+        <Notice tone="danger" title={`${errors.length} ${errors.length === 1 ? 'problem' : 'problems'} blocking publication`}>
           <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
-            {validation.errors.map((issue) => (
+            {errors.map((issue) => (
               <li key={`${issue.code}-${issue.node}`}>
                 {issue.node ? <strong>{issue.node}: </strong> : null}{issue.message}
               </li>
@@ -387,10 +405,10 @@ function ValidationSummary({ validation }: { validation: FlowValidation }) {
         </Notice>
       ) : null}
 
-      {validation.warnings.length > 0 ? (
+      {warnings.length > 0 ? (
         <Notice tone="warning" title="Worth a look — these do not block publication">
           <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
-            {validation.warnings.map((issue) => (
+            {warnings.map((issue) => (
               <li key={`${issue.code}-${issue.node}`}>
                 {issue.node ? <strong>{issue.node}: </strong> : null}{issue.message}
               </li>
@@ -449,11 +467,11 @@ function groupIssues(validation: FlowValidation | null): Record<string, Array<Fl
   const out: Record<string, Array<FlowIssue & { severity: 'error' | 'warning' }>> = {}
   if (!validation) return out
 
-  for (const issue of validation.errors) {
+  for (const issue of Array.isArray(validation.errors) ? validation.errors : []) {
     if (!issue.node) continue
     ;(out[issue.node] ??= []).push({ ...issue, severity: 'error' })
   }
-  for (const issue of validation.warnings) {
+  for (const issue of Array.isArray(validation.warnings) ? validation.warnings : []) {
     if (!issue.node) continue
     ;(out[issue.node] ??= []).push({ ...issue, severity: 'warning' })
   }

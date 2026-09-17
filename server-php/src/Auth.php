@@ -193,8 +193,32 @@ final class Auth
         };
     }
 
+    /**
+     * The session key from the request.
+     *
+     * Normally the Authorization header. The one exception is the EventSource
+     * stream: the browser's EventSource cannot set headers at all, so the key
+     * may also arrive as `access_token` on that ONE route.
+     *
+     * That is a real widening and it is bounded deliberately:
+     *   - only /v1/events accepts it, checked against the request path here;
+     *   - the request is same-origin, so the key does not cross a domain;
+     *   - the server never logs the query string (see Clients\ApiClient::log).
+     *
+     * Allowing it everywhere would put session keys in access logs, in
+     * `Referer` headers and in browser history for every request this product
+     * makes, which is exactly why it is not allowed everywhere.
+     */
     private static function bearer(): string
     {
+        $path = (string) (parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH) ?: '');
+        if (str_ends_with(rtrim($path, '/'), '/v1/events')) {
+            $fromQuery = $_GET['access_token'] ?? '';
+            if (is_string($fromQuery) && $fromQuery !== '') {
+                return trim($fromQuery);
+            }
+        }
+
         $header = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
         if (!is_string($header) || $header === '') {
             if (function_exists('apache_request_headers')) {

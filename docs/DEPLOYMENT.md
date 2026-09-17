@@ -138,3 +138,103 @@ itself, a system directory, or anything containing `..` is refused.
    `https://<host>/api/health` returns the right `env` and open the site to
    sign in. See [auth/AICOUNTLY_AUTH_WORKFLOW.md](auth/AICOUNTLY_AUTH_WORKFLOW.md)
    for what a healthy login looks like.
+
+---
+
+## Voice API: first deploy of this release
+
+The API now has a database, background workers and provider credentials. Three
+steps on the server after the first deploy that includes them.
+
+### 1. Create the database and fill in the server `.env`
+
+`server-php/.env` is created once on the server and survives every deploy — the
+API rsync excludes it. `server-php/.env.example` documents every variable.
+
+```bash
+cd <document root>/api
+cp .env.example .env
+```
+
+Fill in `DB_NAME`, `DB_USER`, `DB_PASS`, then:
+
+```bash
+# 32 bytes, base64. WITHOUT THIS, STORING A PROVIDER CREDENTIAL IS REFUSED —
+# this product does not fall back to plaintext.
+head -c 32 /dev/urandom | base64
+```
+
+Put the result in `CREDENTIAL_ENCRYPTION_KEY`. Rotating it later makes existing
+stored credentials undecryptable and they must be re-entered.
+
+### 2. Apply the schema
+
+```bash
+php bin/migrate.php --status    # what would run, changes nothing
+php bin/migrate.php             # apply it
+```
+
+Each file runs in its own transaction and is recorded by name and checksum, so a
+half-applied migration cannot exist. An already-applied file that has since been
+edited is reported as drift and stops the run rather than being reapplied.
+
+### 3. Add the workers to cron
+
+Voice-owned work only. None of these copies another product's database.
+
+```cron
+# Campaign dispatch. Safe to run several copies: every attempt is claimed with a
+# conditional UPDATE before anything is dialled.
+* * * * * cd /home/<user>/public_html/api && php bin/campaign-worker.php >> ~/logs/voice-campaign.log 2>&1
+
+# Marks calls whose provider went quiet as stale, and settles external writes
+# whose outcome was never learned by asking the owning product.
+*/5 * * * * cd /home/<user>/public_html/api && php bin/call-recovery.php >> ~/logs/voice-recovery.log 2>&1
+
+# Retention. Off-peak: it deletes recordings, transcripts and index entries.
+17 3 * * * cd /home/<user>/public_html/api && php bin/retention.php >> ~/logs/voice-retention.log 2>&1
+```
+
+Run `php bin/retention.php --dry-run` first on a live database to see what is
+due before anything is deleted.
+
+### 4. Check what the deployment can actually do
+
+```bash
+curl -s https://voice.aicountly.com/api/health | python3 -m json.tool
+```
+
+`capabilities` lists what is switched on. `unconfigured` names, for each
+capability that is off, the exact environment variable that would enable it. The
+endpoint is unauthenticated and deliberately says nothing about any tenant and
+never names a credential's value.
+
+### Telephony
+
+A company can place calls only once it has an active provider connection, which
+is a per-company row rather than a deployment setting — configured in the app
+under Settings → Provider connections, by somebody holding
+`voice.providers.manage`.
+
+`VOICE_GATEWAY_URL` and `VOICE_GATEWAY_KEY` point at the Voice Gateway, the
+separate service that owns SIP, WebRTC, media and streaming speech. Without it
+there is no browser calling and no live transcription, and the UI says so on
+every screen that needs them rather than showing controls that do nothing.
+
+Carrier adapters (Exotel, Airtel IQ, Tata and the rest) are not in this
+repository. Each needs its own class written against that carrier's real
+documentation, with credentials to test against.
+
+### Provider callbacks
+
+Point each provider's webhook at:
+
+```
+https://voice.aicountly.com/api/webhooks/telephony/<connection_id>
+```
+
+That route carries no AICOUNTLY identity. It is verified by the provider's own
+signature scheme against the connection named in the path, and the only thing it
+can do is move Voice-owned call state on that connection. A correctly signed
+callback almost always answers 200 — including duplicates and out-of-order
+events — because a carrier that receives a non-2xx retries for hours.

@@ -68,11 +68,25 @@ final class CallFlowsController extends Controller
             'flow_id'     => $flowId,
             'name'        => (string) $flow['name'],
             'description' => (string) $flow['description'],
-            'versions'    => Db::all(
-                'SELECT version_id, version_no, status, definition, validation, published_at, created_at
-                   FROM voice_call_flow_versions WHERE flow_id = :id AND cmp_id = :cmp
-                  ORDER BY version_no DESC LIMIT 25',
-                ['id' => $flowId, 'cmp' => $ctx->cmpId],
+            // Decoded, not passed through: PDO hands a jsonb column back as a
+            // string, and a string where the editor expects a graph is a blank
+            // screen rather than an error.
+            'versions'    => array_map(
+                static fn (array $row): array => [
+                    'version_id'   => (int) $row['version_id'],
+                    'version_no'   => (int) $row['version_no'],
+                    'status'       => (string) $row['status'],
+                    'definition'   => Db::jsonColumn($row['definition'] ?? null),
+                    'validation'   => Db::jsonColumn($row['validation'] ?? null),
+                    'published_at' => $row['published_at'],
+                    'created_at'   => $row['created_at'],
+                ],
+                Db::all(
+                    'SELECT version_id, version_no, status, definition, validation, published_at, created_at
+                       FROM voice_call_flow_versions WHERE flow_id = :id AND cmp_id = :cmp
+                      ORDER BY version_no DESC LIMIT 25',
+                    ['id' => $flowId, 'cmp' => $ctx->cmpId],
+                ),
             ),
             'node_types'   => FlowValidator::NODE_TYPES,
             'capabilities' => ProviderRegistry::forCompany($ctx)->capabilities(),

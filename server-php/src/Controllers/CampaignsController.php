@@ -72,6 +72,8 @@ final class CampaignsController extends Controller
 
         Http::data(self::present($row) + [
             'funnel'   => CampaignService::funnel($ctx, $campaignId),
+            // external_ref and the resolution state only — never a copy of the
+            // contact the reference points at.
             'audience' => Db::all(
                 'SELECT audience_ref_id, source, external_ref, resolution, resolution_detail, resolved_at
                    FROM voice_campaign_audience_refs WHERE campaign_id = :id ORDER BY audience_ref_id LIMIT 500',

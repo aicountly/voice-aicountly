@@ -492,10 +492,19 @@ final class WorkspaceController extends Controller
                 ? Permissions::grantable($ctx, $auth)
                 : [],
             'profiles'  => Permissions::allows($ctx, $auth, 'voice.access.manage')
-                ? Db::all(
-                    'SELECT profile_id, name, description, permissions, is_active
-                       FROM voice_permission_profiles WHERE cmp_id = :cmp ORDER BY name',
-                    ['cmp' => $ctx->cmpId],
+                ? array_map(
+                    static fn (array $row): array => [
+                        'profile_id'  => (int) $row['profile_id'],
+                        'name'        => (string) $row['name'],
+                        'description' => (string) $row['description'],
+                        'permissions' => Db::jsonColumn($row['permissions'] ?? null),
+                        'is_active'   => (bool) $row['is_active'],
+                    ],
+                    Db::all(
+                        'SELECT profile_id, name, description, permissions, is_active
+                           FROM voice_permission_profiles WHERE cmp_id = :cmp ORDER BY name',
+                        ['cmp' => $ctx->cmpId],
+                    ),
                 )
                 : [],
             'note' => 'Hiding a control in the browser is a courtesy. Every one of these is asserted again in the backend.',

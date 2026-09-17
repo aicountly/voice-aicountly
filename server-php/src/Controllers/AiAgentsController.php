@@ -52,11 +52,23 @@ final class AiAgentsController extends Controller
 
         Http::data(self::present($row) + [
             'versions' => array_map(static fn (array $v): array => AiAgentService::presentVersion($v), $versions),
-            'tests'    => Db::all(
-                'SELECT test_run_id, scenario, mode, status, checks, failure_reason, started_at, finished_at
-                   FROM voice_ai_test_runs WHERE ai_agent_id = :id AND cmp_id = :cmp
-                  ORDER BY started_at DESC LIMIT 25',
-                ['id' => $agentId, 'cmp' => $ctx->cmpId],
+            'tests'    => array_map(
+                static fn (array $row): array => [
+                    'test_run_id'    => (int) $row['test_run_id'],
+                    'scenario'       => (string) $row['scenario'],
+                    'mode'           => (string) $row['mode'],
+                    'status'         => (string) $row['status'],
+                    'checks'         => Db::jsonColumn($row['checks'] ?? null),
+                    'failure_reason' => $row['failure_reason'],
+                    'started_at'     => $row['started_at'],
+                    'finished_at'    => $row['finished_at'],
+                ],
+                Db::all(
+                    'SELECT test_run_id, scenario, mode, status, checks, failure_reason, started_at, finished_at
+                       FROM voice_ai_test_runs WHERE ai_agent_id = :id AND cmp_id = :cmp
+                      ORDER BY started_at DESC LIMIT 25',
+                    ['id' => $agentId, 'cmp' => $ctx->cmpId],
+                ),
             ),
             'tools' => AiClient::TOOLS,
         ]);
