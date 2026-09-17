@@ -8,18 +8,21 @@ declare(strict_types=1);
  * Deployed to <document root>/api, so it is same-origin with the React app on
  * both voice.aicountly.com and voice.gh.aicountly.com.
  *
- * Routes:
- *   GET  /api/health          liveness + which environment answered
- *   POST /api/global/{path}   allow-listed relay to the portal auth API
- *   GET  /api/session         who the caller is, per the portal
+ * Two surfaces live here:
  *
- * There is deliberately nothing else here yet.
+ *   /api/global/{path}   the allow-listed relay to the portal auth API, which
+ *                        predates the rest of this product and is unchanged.
+ *   /api/...             the Voice API proper — see src/Routes.php for the
+ *                        whole surface.
+ *
+ * Everything under /v1 requires a session and a company scope. The only
+ * exceptions are /health and the signed telephony callbacks, both of which say
+ * so in the route table.
  */
 
 namespace Aicountly\Api;
 
-require __DIR__ . '/src/Env.php';
-require __DIR__ . '/src/Portal.php';
+require __DIR__ . '/src/Autoload.php';
 
 Env::load(__DIR__ . '/.env');
 
@@ -44,18 +47,6 @@ const RELAYED_PATHS = [
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/**
- * @param array<string, mixed> $payload
- */
-function send_json(int $status, array $payload): void
-{
-    http_response_code($status);
-    header('Content-Type: application/json; charset=utf-8');
-    header('Cache-Control: no-store');
-    echo json_encode($payload, JSON_UNESCAPED_SLASHES);
-    exit;
-}
 
 /**
  * The Authorization header, wherever this server happens to expose it.
@@ -88,16 +79,6 @@ function authorization_header(): string
     }
 
     return '';
-}
-
-function bearer_token(): string
-{
-    $header = authorization_header();
-    if ($header === '' || preg_match('/Bearer\s+(.+)/i', $header, $matches) !== 1) {
-        return '';
-    }
-
-    return trim($matches[1]);
 }
 
 /**
@@ -134,8 +115,8 @@ function apply_cors(): void
     }
 
     header('Access-Control-Allow-Origin: ' . $origin);
-    header('Access-Control-Allow-Headers: Authorization, Content-Type');
-    header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+    header('Access-Control-Allow-Headers: Authorization, Content-Type, Idempotency-Key, X-Service-Key, X-Actor-Uuid, X-Correlation-Id, Last-Event-ID');
+    header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
     header('Access-Control-Max-Age: 600');
     header('Vary: Origin');
 }
@@ -146,7 +127,7 @@ function apply_cors(): void
 
 apply_cors();
 
-$method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
+$method = Http::method();
 
 if ($method === 'OPTIONS') {
     http_response_code(204);
@@ -164,20 +145,12 @@ if ($mountPoint !== '' && $mountPoint !== '/' && strpos($uri, $mountPoint) === 0
 
 $path = normalise_path($uri);
 
-if ($path === '' || $path === 'health') {
-    send_json(200, [
-        'status' => 'ok',
-        'app' => 'Voice',
-        'env' => Env::get('APP_ENV', 'unknown'),
-        'time' => gmdate('c'),
-    ]);
-}
-
+// The portal auth relay, unchanged from before this product had an API.
 if (strpos($path, 'global/') === 0) {
     $portalPath = substr($path, strlen('global/'));
 
     if (!in_array($portalPath, RELAYED_PATHS, true)) {
-        send_json(404, ['message' => 'This path is not relayed. Call the portal API directly.']);
+        Http::notFound('This path is not relayed. Call the portal API directly.');
     }
 
     $headers = [];
@@ -194,7 +167,7 @@ if (strpos($path, 'global/') === 0) {
     $result = Portal::forward($method, $portalPath, $headers, $body);
 
     if ($result['status'] === 504) {
-        send_json(504, ['message' => 'Auth service unavailable — please retry.']);
+        Http::error(504, 'auth_unavailable', 'Auth service unavailable — please retry.');
     }
 
     http_response_code($result['status']);
@@ -204,21 +177,45 @@ if (strpos($path, 'global/') === 0) {
     exit;
 }
 
+// Who the caller is, per the portal. Predates /v1 and is kept for the SPA's
+// boot sequence.
 if ($path === 'session') {
-    $sesKey = bearer_token();
+    $header = authorization_header();
+    $sesKey = preg_match('/Bearer\s+(.+)/i', $header, $matches) === 1 ? trim($matches[1]) : '';
     if ($sesKey === '') {
-        send_json(401, ['message' => 'Missing bearer session key.']);
+        Http::unauthorized('Missing bearer session key.');
     }
 
     $session = Portal::validateSesKey($sesKey);
     if ($session === null) {
-        send_json(401, ['message' => 'Invalid or expired session.']);
+        Http::unauthorized('Invalid or expired session.');
     }
 
-    send_json(200, [
+    Http::data([
         'authenticated' => true,
         'uuid' => $session['uuid_aictly'] ?? ($session['uuid'] ?? ''),
     ]);
 }
 
-send_json(404, ['message' => 'Not found.']);
+$router = new Router();
+Routes::register($router);
+
+try {
+    if (!$router->dispatch($method, $path)) {
+        Http::notFound();
+    }
+} catch (ResponseSent $sent) {
+    // Only reachable under CLI, where Http throws instead of exiting.
+    http_response_code($sent->status);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode($sent->payload, JSON_UNESCAPED_SLASHES);
+    exit;
+} catch (\PDOException $e) {
+    // A DSN or a bound parameter can appear in a PDO message, and a bound
+    // parameter here can be a phone number.
+    error_log('[voice] database error: ' . $e->getMessage());
+    Http::error(503, 'database_unavailable', 'The service is temporarily unavailable. Please retry.');
+} catch (\Throwable $e) {
+    error_log('[voice] unhandled: ' . $e::class . ' ' . $e->getMessage() . ' at ' . $e->getFile() . ':' . $e->getLine());
+    Http::error(500, 'internal_error', 'Something went wrong handling that request.');
+}
