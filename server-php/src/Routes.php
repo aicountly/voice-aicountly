@@ -36,7 +36,12 @@ final class Routes
         // -------------------------------------------------------------------
         // Liveness. Says which environment answered and what is configured —
         // never a credential and never a tenant's data.
+        //
+        // Registered at the bare root as well, because that is where this API
+        // answered health before it had a route table and something may still
+        // be pointed at it.
         $router->get('/health', [Health::class, 'show']);
+        $router->get('/', [Health::class, 'show']);
 
         // Telephony callbacks. NO Aicountly identity; authenticated by the
         // provider's own signature against the connection named in the path.
