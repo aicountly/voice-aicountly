@@ -294,11 +294,21 @@ jobs:
           # for that api/.env. Rsync filter rules are first-match-wins, so the
           # include has to come before the broader .env.* exclude or it would
           # never be reached.
+          #
+          # tests/ is dev-only and is never shipped: requested over HTTP its
+          # scripts run against the live api/.env, and tests/integration.php (and
+          # tests/seed-walkthrough.php) truncate every Voice table on the
+          # database that .env names. 'H' hides it on the sender only, so --delete
+          # also removes a copy an earlier deploy left behind, where a plain
+          # --exclude would protect that copy. bin/ and database/ still ship: the
+          # cron workers and migrations run them over SSH, and .htaccess 404s
+          # them over HTTP.
           rsync -avz --delete \
             --exclude='.env' \
             --include='.env.example' \
             --exclude='.env.*' \
             --exclude='.git*' \
+            --filter='H /tests/' \
             --chmod=D755,F644 \
             -e ssh \
             server-php/ "deploy-target:$REMOTE_ROOT/api/"

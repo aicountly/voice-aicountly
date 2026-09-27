@@ -108,6 +108,15 @@ RedirectMatch 404 /\.(?!well-known)
 The web build does the same for the document root via `web/public/.htaccess`,
 but those rules stop applying inside `api/` once the API's own take over.
 
+The same file also lets **only the front controller answer**: any other real file
+or folder under `api/` — `tests/`, `bin/`, `database/`, `src/`, or a PHP
+`error_log` written at any depth — returns 404, so nothing is served as source or
+run as PHP against the live `.env`. `.well-known/` stays reachable for certificate
+renewal. The deploy reinforces this by never shipping `server-php/tests/` (an
+rsync `--filter='H /tests/'`, which also deletes any copy an earlier deploy left
+on the server); `bin/` and `database/` still ship, because the cron workers and
+migrations run them over SSH.
+
 ### The Authorization header
 
 `server-php/.htaccess` also copies the `Authorization` header into the request
