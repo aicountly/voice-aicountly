@@ -36,8 +36,10 @@ final class Features
      * @var array<string, list<string>>
      */
     private const REQUIREMENTS = [
-        // Voice's own AI, with keys governed centrally by Console.
-        'AI'              => ['CONSOLE_API_URL', 'CONSOLE_SERVICE_KEY'],
+        // Voice's AI runs through AI Pulse with the signed-in user's own
+        // session, so there is no key or model to configure here: the switch
+        // alone decides, and Pulse reports whether it has a model for Voice.
+        'AI'              => [],
         // The media/telephony service. Browser calling and streaming speech are
         // its job, not PHP's; with no gateway there is no browser calling and
         // the UI must say so rather than showing a dead Call button.

@@ -186,7 +186,10 @@ final class IntelligenceController extends Controller
     /**
      * Generate or fetch a call summary.
      *
-     * With no model configured this produces a DETERMINISTIC summary from the
+     * The model's summary comes from AI Pulse, asked with this user's own
+     * session (feature `call.summary`); the row keeps the model Pulse used and
+     * Pulse's task id, never anything Pulse did not return. With AI switched off
+     * or Pulse unable to answer this produces a DETERMINISTIC summary from the
      * call record and says `engine: rules`. The screen reports which produced
      * it rather than implying a model ran.
      */
@@ -220,9 +223,10 @@ final class IntelligenceController extends Controller
             ]);
         }
 
-        $result = AiClient::summariseCall($segments);
-        $engine = $result['ok'] ? 'model' : 'rules';
-        $body = $result['ok'] && $result['text'] !== null
+        $result = AiClient::summariseCall($auth, $ctx, $segments);
+        $byModel = $result['ok'] && $result['text'] !== null;
+        $engine = $byModel ? 'model' : 'rules';
+        $body = $byModel
             ? $result['text']
             : self::ruleBasedSummary($ctx->cmpId, $callId, $segments);
 
@@ -231,7 +235,7 @@ final class IntelligenceController extends Controller
             ['id' => $callId],
         ) ?? 1);
 
-        $summaryId = (int) Db::insert('voice_call_summaries', [
+        $values = [
             'call_id'    => $callId,
             'cmp_id'     => $ctx->cmpId,
             'version_no' => $nextNo,
@@ -241,7 +245,15 @@ final class IntelligenceController extends Controller
             'evidence'   => array_map(static fn (array $s): int => (int) $s['segment_id'], array_slice($segments, 0, 20)),
             'engine'     => $engine,
             'created_by' => $auth->uuid,
-        ], 'summary_id');
+        ];
+        if ($byModel) {
+            // Which model AI Pulse ran, and Pulse's id for the call — its
+            // content-free record and Console's usage line carry the same id.
+            $values['model'] = $result['model'];
+            $values['ai_task_id'] = $result['task_id'];
+        }
+
+        $summaryId = (int) Db::insert('voice_call_summaries', $values, 'summary_id');
 
         Http::data(self::presentSummary(Db::first(
             'SELECT * FROM voice_call_summaries WHERE summary_id = :id',

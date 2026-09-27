@@ -13,6 +13,7 @@ declare(strict_types=1);
 
 namespace Aicountly\Api\Tests;
 
+use Aicountly\Api\Ai\AiClient;
 use Aicountly\Api\Auth;
 use Aicountly\Api\Context;
 use Aicountly\Api\Db;
@@ -132,6 +133,8 @@ function resetRequestState(array $body = []): void
     Permissions::forget();
     Settings::resetForTesting();
     ProviderRegistry::resetForTesting();
+    // A real request starts without AI Pulse's status answer from the last one.
+    AiClient::resetForTesting();
 }
 
 /** Clear every header a previous request set, so one test cannot leak into the next. */
