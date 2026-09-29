@@ -64,6 +64,9 @@ final class IntelligenceDashboard extends Dashboard
             ['cmp' => $this->ctx->cmpId, 'from' => $from],
         ) ?? 0);
 
+        // Asked once, with this user's session: AI runs through AI Pulse.
+        $ai = AiClient::describeAvailability($this->auth);
+
         $metrics = [
             Metric::make('calls_reviewed', 'Calls in period', $reviewed, 'count', null, 'neutral', 'Completed calls available to search.'),
             Metric::make('commitments_found', 'Commitments found', (int) ($commitments['found'] ?? 0), 'count', null, 'neutral',
@@ -88,8 +91,8 @@ final class IntelligenceDashboard extends Dashboard
                 // Says plainly what search can reach, so nobody assumes it
                 // searches Contacts or CRM. It does not, and must not.
                 'scope' => 'Voice transcripts and call records for this company only.',
-                'natural_language' => AiClient::isAvailable(),
-                'natural_language_reason' => AiClient::isAvailable() ? null : \Aicountly\Api\Features::explain('AI'),
+                'natural_language' => $ai['available'] === true,
+                'natural_language_reason' => $ai['available'] === true ? null : $ai['reason'],
             ],
             'permissions'  => [
                 'can_listen'    => Permissions::allows($this->ctx, $this->auth, 'voice.recordings.listen'),

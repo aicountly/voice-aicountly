@@ -164,7 +164,7 @@ export default function LiveOperations() {
                 <Card title="AI Copilot" subtitle="Suggestions. Nothing acts on its own.">
                   <VoiceCopilotPanel
                     available={false}
-                    unavailableReason="No AI provider is configured for this deployment, so there are no live suggestions."
+                    unavailableReason="Live in-call suggestions are not available in this deployment."
                     intent={null}
                     facts={[]}
                     suggestion={null}

@@ -65,7 +65,7 @@ export function VoiceCopilotPanel({
     return (
       <div className="vstack vstack--tight">
         <Notice tone="info" title="AI Copilot is not configured">
-          {unavailableReason ?? 'No AI provider is configured for this deployment, so there are no suggestions.'}
+          {unavailableReason ?? 'AI is not available in this deployment, so there are no suggestions.'}
         </Notice>
       </div>
     )

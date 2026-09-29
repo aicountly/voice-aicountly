@@ -65,7 +65,8 @@ final class StudioDashboard extends Dashboard
 
         return $this->envelope($metrics, [
             'agents' => $agents,
-            'ai'     => AiClient::describeAvailability(),
+            // Read-only: AI runs through AI Pulse, asked with this user's session.
+            'ai'     => AiClient::describeAvailability($this->auth),
             'scenarios' => $this->scenarioCatalogue(),
             'provider_capabilities' => ProviderRegistry::forCompany($this->ctx)->capabilities(),
             'node_types' => FlowValidator::NODE_TYPES,

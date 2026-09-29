@@ -22,7 +22,17 @@ import { DashboardFrame, useDashboard } from './frame'
 
 interface Panels {
   agents: AiAgent[]
-  ai: { available: boolean; model: string | null; provider: string | null; reason: string | null; admin_hint: string | null }
+  /**
+   * Read-only. AI runs through AI Pulse, which picks the model: there is no
+   * model, provider or key to choose in Voice. `available` is Pulse's answer.
+   */
+  ai: {
+    available: boolean | null
+    service: string
+    tiers: { economy: boolean; strong: boolean } | null
+    reason: string | null
+    admin_hint: string | null
+  }
   scenarios: Array<{ key: string; label: string; detail: string }>
   provider_capabilities: Record<string, boolean>
   node_types: string[]
@@ -84,12 +94,12 @@ export default function Studio() {
 
         return (
           <>
-            {!studio.ai.available ? (
-              <Notice tone="warning" title="No AI provider is configured">
+            {studio.ai.available !== true ? (
+              <Notice tone="warning" title="AI is unavailable">
                 <p>
                   {studio.ai.reason}
                   {studio.ai.admin_hint && can('voice.settings.manage') ? ` ${studio.ai.admin_hint}` : ''}
-                  {' '}Agents can still be built and validated; they cannot take calls until a provider is connected.
+                  {' '}Agents can still be built and validated; they cannot take calls until AI is available.
                 </p>
               </Notice>
             ) : null}

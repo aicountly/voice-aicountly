@@ -100,12 +100,15 @@ each needs its own file written against that carrier's real documentation with
 credentials to test against, and an adapter written from a guess is worse than
 no adapter because it looks finished.
 
-### AI is Voice's own, with keys governed centrally
+### AI is Voice's own, and runs through AI Pulse
 
 Voice owns its prompts, its calling-domain workflows and its action allowlist
-(`src/Ai/AiClient.php`). Provider keys are resolved per request from
-console.aicountly.org and never come to rest in a file next to this code, never
-reach the browser, and never appear in a log.
+(`src/Ai/AiClient.php`). Every model call goes to the AI Pulse gateway
+(`src/Ai/PulseAiClient.php`, contract: pulse-aicountly `docs/AI_GATEWAY.md`)
+with the signed-in user's own session: Pulse picks the model from Console,
+enforces the daily AI allowance and reports usage per feature (`call.summary`).
+Voice holds no model key, calls no model provider and has no fallback model —
+when Pulse cannot answer, the rule-based path does, and the screen says so.
 
 A consequential action — booking, rescheduling, taking a payment — can never be
 configured as merely "allowed"; the server forces it to require caller
@@ -201,14 +204,15 @@ second line of defence behind it.
 ## Tests
 
 ```bash
-server-php/tests/run.sh      # 152 assertions against a real PostgreSQL
+server-php/tests/run.sh      # 203 assertions against a real PostgreSQL
 cd web && npm run test:ui    # frontend unit tests
 ```
 
 The suite drives the real controllers through the real router with an adopted
 identity, so permission checks are exercised rather than bypassed. A local stub
-stands in for Manage, Contacts, Calendar, CRM and the gateway: **no test places a
-call, launches a campaign or writes to a real product.**
+stands in for Manage, Contacts, Calendar, CRM and the gateway, and AI Pulse is
+faked at the client's transport: **no test places a call, launches a campaign,
+writes to a real product or reaches a model.**
 
 What it covers: tenant isolation including a transcript read across companies,
 permission enforcement per surface, duplicate and out-of-order provider events,
@@ -217,8 +221,11 @@ failures creating no local mirror, provider capability gating, webhook signature
 and replay, campaign pause and duplicate-dial prevention, launch readiness, AI
 action permissions, flow validation, publish gating and version immutability,
 budget and concurrency enforcement, calling windows across timezones, retention
-with legal holds, audited recording access, and the structural no-cross-app-DB
-check.
+with legal holds, audited recording access, the structural no-cross-app-DB
+check, and AI through AI Pulse — what each feature sends (feature, tier, the
+user's session or the service key, company scope), what each gateway error
+becomes, availability from Pulse's status, and a guard that no model provider
+host, SDK or model key is left in the app.
 
 ## Environment variables
 
@@ -243,8 +250,12 @@ without it. The ones with no safe default:
 - `VOICE_GATEWAY_URL` / `VOICE_GATEWAY_KEY` — no gateway means no browser
   calling and no live transcription, and the UI says so rather than showing
   controls that do nothing.
-- `CONSOLE_API_URL` / `CONSOLE_SERVICE_KEY` — no AI. The deterministic paths
-  answer instead and the screen says the result is rule-based.
+- `VOICE_AI_ENABLED` — off means no AI: the deterministic paths answer
+  instead and the screen says the result is rule-based. On, AI runs through
+  AI Pulse with the user's own session; there is no model key to set.
+  `PULSE_API_ORIGIN` is derived from the host unless set, and
+  `PULSE_SERVICE_KEY` is needed only for AI a service caller (no user session)
+  starts.
 
 ## Deployment
 

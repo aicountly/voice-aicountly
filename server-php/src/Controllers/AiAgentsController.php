@@ -17,7 +17,7 @@ final class AiAgentsController extends Controller
 {
     public static function index(): never
     {
-        [, $ctx] = self::enter('voice.ai.view');
+        [$auth, $ctx] = self::enter('voice.ai.view');
         [$scope, $params] = $ctx->scopeClause();
 
         $rows = Db::all(
@@ -28,7 +28,7 @@ final class AiAgentsController extends Controller
         Http::data([
             'agents' => array_map(static fn (array $r): array => self::present($r), $rows),
             'tools'  => AiClient::TOOLS,
-            'ai'     => AiClient::describeAvailability(),
+            'ai'     => AiClient::describeAvailability($auth),
             'node_types' => FlowValidator::NODE_TYPES,
             'provider_capabilities' => ProviderRegistry::forCompany($ctx)->capabilities(),
         ]);

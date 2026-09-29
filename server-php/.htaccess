@@ -20,6 +20,15 @@
   RewriteCond %{HTTP:Authorization} .
   RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 
+  # Only the front controller answers. Any other real file or folder here
+  # (tests/, bin/, database/, src/, a PHP error_log) would be served as text or
+  # run as PHP with the live .env, so it is a 404. .well-known stays reachable
+  # for certificate renewal. The pattern is relative, like the rules above, so
+  # it holds at <docroot>/api and at a dedicated vhost root alike.
+  RewriteCond %{REQUEST_FILENAME} -f [OR]
+  RewriteCond %{REQUEST_FILENAME} -d
+  RewriteRule !^(index\.php|\.well-known/.*)?$ - [R=404,L]
+
   # Everything that is not a real file goes to the front controller.
   RewriteCond %{REQUEST_FILENAME} !-f
   RewriteCond %{REQUEST_FILENAME} !-d
@@ -35,3 +44,10 @@
 # The API's .env sits inside the document root, so without this it would be
 # fetchable over HTTP at https://voice.aicountly.com/api/.env.
 RedirectMatch 404 /\.(?!well-known)
+
+# A PHP error_log can be written at any depth — index.php logs database and
+# unhandled errors, and such a line can hold a phone number or a DSN. The
+# front-controller 404 above is a RewriteRule and would not survive a nested
+# .htaccess that turns rewriting back on, so block error_log with mod_alias, the
+# same way as the dotfiles above, at any depth.
+RedirectMatch 404 (?i)/error_log$

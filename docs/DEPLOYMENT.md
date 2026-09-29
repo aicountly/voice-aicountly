@@ -108,6 +108,15 @@ RedirectMatch 404 /\.(?!well-known)
 The web build does the same for the document root via `web/public/.htaccess`,
 but those rules stop applying inside `api/` once the API's own take over.
 
+The same file also lets **only the front controller answer**: any other real file
+or folder under `api/` — `tests/`, `bin/`, `database/`, `src/`, or a PHP
+`error_log` written at any depth — returns 404, so nothing is served as source or
+run as PHP against the live `.env`. `.well-known/` stays reachable for certificate
+renewal. The deploy reinforces this by never shipping `server-php/tests/` (an
+rsync `--filter='H /tests/'`, which also deletes any copy an earlier deploy left
+on the server); `bin/` and `database/` still ship, because the cron workers and
+migrations run them over SSH.
+
 ### The Authorization header
 
 `server-php/.htaccess` also copies the `Authorization` header into the request
@@ -208,6 +217,36 @@ curl -s https://voice.aicountly.com/api/health | python3 -m json.tool
 capability that is off, the exact environment variable that would enable it. The
 endpoint is unauthenticated and deliberately says nothing about any tenant and
 never names a credential's value.
+
+### AI
+
+Voice's AI runs through the AI Pulse gateway, with the signed-in user's own
+session. There is no model key, model name or provider to configure here:
+
+```
+VOICE_AI_ENABLED=1
+# PULSE_API_ORIGIN=https://pulse.aicountly.com   only to override the host-derived origin
+# PULSE_SERVICE_KEY=…                            only for AI a service caller (no user) starts
+```
+
+`PULSE_API_ORIGIN` left unset means production Pulse on voice.aicountly.com and
+the sandbox, https://pulse.gh.aicountly.com, on voice.gh.aicountly.com.
+`PULSE_SERVICE_KEY` falls back to `CONSOLE_SERVICE_KEY`.
+
+When moving an existing deployment onto AI Pulse:
+
+1. Deploy, then run `php bin/migrate.php` straight away: 009 adds the column
+   that keeps Pulse's id on each model-written summary, and until it has run
+   such a summary cannot be saved.
+2. Delete `CONSOLE_API_URL` from `api/.env` — nothing reads it any more. Rename
+   `CONSOLE_SERVICE_KEY` to `PULSE_SERVICE_KEY`, or delete it if no other
+   product calls Voice for summaries with a service key.
+3. Set `VOICE_AI_ENABLED=1` if it is not already: it is now the only switch.
+4. In Console → AI → Domains, switch Voice to **Using AI Pulse** and remove its
+   stored keys.
+
+`GET /api/health` reports `ai.service: "AI Pulse"`; the AI Voice Studio screen
+shows whether Pulse has a model for Voice, asked with the viewer's session.
 
 ### Telephony
 

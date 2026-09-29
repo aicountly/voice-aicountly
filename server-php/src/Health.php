@@ -32,6 +32,8 @@ final class Health
                 // Why each capability is off, for an administrator reading this
                 // on a host they can change.
                 'unconfigured' => self::unconfigured(),
+                // AI runs through AI Pulse. With no user here, Pulse is asked
+                // only when a service key is configured; otherwise this says so.
                 'ai'       => AiClient::describeAvailability(),
             ],
         ]);
