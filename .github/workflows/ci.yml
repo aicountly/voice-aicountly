@@ -1,0 +1,104 @@
+# ---------------------------------------------------------------------------
+# Continuous integration — checks only, and started by hand like the deploy
+# workflows: Actions → CI → Run workflow → pick a branch. Nothing here deploys,
+# and nothing runs automatically on push or pull request. The same checks run
+# locally with the commands in the README.
+#
+#   api  php -l on every file, then the integration suite against a throwaway
+#        PostgreSQL and the local stub (server-php/tests/run.sh) — including
+#        the Calendar Events API v1 stub the callback diary is proven against
+#   web  type-check, unit tests and a production build of web/
+# ---------------------------------------------------------------------------
+name: CI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api:
+    name: API — lint and tests (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # The lowest version the API supports, and a current one.
+        php: ['8.1', '8.4']
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: voice_test
+          POSTGRES_PASSWORD: voice_test
+          POSTGRES_DB: voice_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U voice_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: pdo_pgsql, curl, mbstring
+          coverage: none
+
+      - name: Lint
+        run: |
+          failed=0
+          while IFS= read -r -d '' file; do
+            php -l "$file" > /dev/null || failed=1
+          done < <(find server-php -name '*.php' -print0)
+          exit $failed
+
+      - name: Integration tests
+        env:
+          TEST_DB_HOST: 127.0.0.1
+          TEST_DB_PORT: '5432'
+          TEST_DB_NAME: voice_test
+          TEST_DB_USER: voice_test
+          TEST_DB_PASS: voice_test
+        run: bash server-php/tests/run.sh
+
+  web:
+    name: Web — type-check, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test:ui
+
+      - name: Build
+        run: npm run build
