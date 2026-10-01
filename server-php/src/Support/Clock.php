@@ -94,6 +94,27 @@ final class Clock
         }
     }
 
+    /**
+     * Parse a time somebody gave us, reading one WITHOUT an offset in $zone.
+     *
+     * "2026-10-12 15:00" from a company in Kolkata is 09:30Z, not 15:00 in
+     * whatever zone the server happens to run in. A value that carries its own
+     * offset or Z keeps it; $zone only decides the ones that do not.
+     */
+    public static function parseIn(?string $value, DateTimeZone $zone): ?DateTimeImmutable
+    {
+        $value = trim((string) $value);
+        if ($value === '') {
+            return null;
+        }
+
+        try {
+            return (new DateTimeImmutable($value, $zone))->setTimezone(self::utc());
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
     /** The wire format for every timestamp this API sends. */
     public static function iso(DateTimeImmutable $moment): string
     {

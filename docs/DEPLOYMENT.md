@@ -248,6 +248,64 @@ When moving an existing deployment onto AI Pulse:
 `GET /api/health` reports `ai.service: "AI Pulse"`; the AI Voice Studio screen
 shows whether Pulse has a model for Voice, asked with the viewer's session.
 
+### Aicountly Calendar (callback diary entries)
+
+Off by default, and to stay off until it has been checked against the Calendar
+it will talk to. When on, a callback can hold its time in a diary: a 15-minute
+busy entry in the assigned agent's Aicountly Calendar (the creator's when nobody
+is assigned), titled only "Callback · #<id>", which Voice moves when the
+callback is rescheduled, cancels when it is cancelled, and moves to the new
+agent's diary when it is reassigned (`src/Domain/CallbackDiary.php`). It is
+written under Calendar's Events API v1 — calendar-react-app
+`docs/ecosystem-alignment/CONTRACTS.md` — with Voice's own service key, the
+assigned agent as `X-Actor-Uuid` and the company as `X-Tenant-Ref`.
+
+In order:
+
+1. **Calendar serves contract v1.** `GET https://calendar.aicountly.com/api/health`
+   reports `contract_version: 1` (Calendar's `09_contract_v1.sql` is applied).
+   Against an older Calendar every write stays "not confirmed" — a 2xx without
+   an event version is never taken as success.
+2. **Calendar's host knows Voice's key, under the label `voice`.** The label is
+   the product identity: Calendar stamps it on every entry Voice writes, and
+   Voice's reconciliation looks entries up by `source_app=voice`.
+
+   ```bash
+   openssl rand -hex 32        # once; the same value goes on both hosts
+   ```
+
+   ```
+   # Calendar host, api/.env
+   CALENDAR_SERVICE_KEYS=appointments:<its key>,voice:<the 64 hex characters>
+   ```
+
+   The default scopes for `voice` (everything except recurring events) are what
+   Voice uses: create, own-event read/update/cancel/lookup, free/busy.
+3. **Voice's `api/.env`:**
+
+   ```
+   VOICE_CALENDAR_ENABLED=1
+   CALENDAR_SERVICE_KEY=<the same 64 hex characters>
+   ```
+
+4. **Schema:** `php bin/migrate.php` — `010_voice_callback_diary.sql` adds the
+   entry's reference columns. Additive; nothing existing changes.
+5. **Cron:** `bin/call-recovery.php` (step 3 above) settles diary writes whose
+   outcome was not confirmed — by asking Calendar, never by guessing — and
+   resends attempts Calendar refused before acting once it accepts them.
+6. **Prove it:** Integrations → **Test all**. Calendar must read **Connected**, which
+   means an authenticated free/busy read for you, as Voice, for this company,
+   was accepted. **Degraded** says what is wrong: the key is not accepted,
+   Calendar is not on contract v1, or its v1 schema is not applied.
+
+Each agent who should get entries needs a Voice agent profile whose `user_uuid`
+is their AICOUNTLY subscriber id, and membership of the company in Manage —
+Calendar checks the person against the company named in `X-Tenant-Ref`.
+
+Switching it off again (`VOICE_CALENDAR_ENABLED=0`) leaves entries already
+written in the diaries. Voice stops changing them, and a callback changed while
+it is off says its entry was not changed.
+
 ### Telephony
 
 A company can place calls only once it has an active provider connection, which

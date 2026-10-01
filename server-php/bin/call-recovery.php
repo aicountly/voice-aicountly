@@ -15,16 +15,23 @@ declare(strict_types=1);
  *     what has failed is our knowledge of it, not the call.
  *
  *  2. External writes whose outcome we never learned are settled by ASKING the
- *     owning product what it holds against our correlation id. That is the
- *     alternative to a blind retry, and the reason one caller does not end up
- *     with two appointments.
+ *     owning product what it holds. That is the alternative to a blind retry,
+ *     and the reason one callback does not end up with two diary entries.
+ *
+ *     Calendar (callback diary entries) follows its v1 contract, §12: ask by
+ *     source_ref as the diary owner the entry was written for; adopt what it
+ *     holds; when it holds nothing, send the SAME attempt again under the same
+ *     Idempotency-Key; when it cannot be asked, keep asking later — an unknown
+ *     outcome is never turned into "failed". Attempts Calendar refused before
+ *     acting (deferred: key, scope, schema) are sent again unchanged, or
+ *     dropped unsent when the callback has moved on. See Domain\CallbackDiary.
  */
 
 namespace Aicountly\Api;
 
-use Aicountly\Api\Clients\CalendarClient;
 use Aicountly\Api\Clients\CrmClient;
 use Aicountly\Api\Clients\PayClient;
+use Aicountly\Api\Domain\CallbackDiary;
 use Aicountly\Api\Domain\CallStateMachine;
 
 require __DIR__ . '/../src/Autoload.php';
@@ -36,13 +43,35 @@ $stale = CallStateMachine::markStale();
 $reconciled = 0;
 $stillUnknown = 0;
 $abandoned = 0;
+$resent = 0;
 
 foreach (ExternalOperations::dueForReconcile(50) as $operation) {
     $correlationId = (string) $operation['correlation_id'];
     $targetApp = (string) $operation['target_app'];
 
+    if ($targetApp === 'calendar') {
+        try {
+            $outcome = CallbackDiary::recover($operation);
+        } catch (\Throwable $e) {
+            // One bad row must not stop the rest; it is asked again later.
+            error_log('[call-recovery] calendar operation ' . (int) $operation['operation_id'] . ': ' . $e->getMessage());
+            try {
+                ExternalOperations::retryLater((int) $operation['operation_id'], (int) $operation['attempts'] + 1);
+            } catch (\Throwable) {
+                // The database is the problem; the next run starts over.
+            }
+            $outcome = 'waiting';
+        }
+        match ($outcome) {
+            'settled', 'superseded' => $reconciled++,
+            'resent'                => $resent++,
+            'abandoned'             => $abandoned++,
+            default                 => $stillUnknown++,
+        };
+        continue;
+    }
+
     $result = match ($targetApp) {
-        'calendar' => (new CalendarClient())->findByCorrelation($correlationId),
         'crm'      => (new CrmClient())->findTaskByCorrelation($correlationId),
         'pay'      => (new PayClient())->findByCorrelation($correlationId),
         default    => null,
@@ -97,9 +126,10 @@ foreach (ExternalOperations::dueForReconcile(50) as $operation) {
 }
 
 echo sprintf(
-    "calls_marked_stale=%d operations_reconciled=%d still_unknown=%d abandoned=%d\n",
+    "calls_marked_stale=%d operations_reconciled=%d operations_resent=%d still_unknown=%d abandoned=%d\n",
     $stale,
     $reconciled,
+    $resent,
     $stillUnknown,
     $abandoned,
 );

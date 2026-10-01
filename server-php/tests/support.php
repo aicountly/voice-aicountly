@@ -280,3 +280,102 @@ function stubReset(): void
         @unlink($file);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The Calendar stub (tests/stub/calendar_v1.php) — its database is a file the
+// stub server and the tests share, so a test can seed somebody's diary and
+// read back exactly what Voice sent.
+// ---------------------------------------------------------------------------
+
+/** @return array<string, mixed> events, idempotency, log, denied, stale */
+function calendarStub(): array
+{
+    $raw = @file_get_contents(__DIR__ . '/stub/state/calendar.json');
+    $db = is_string($raw) ? json_decode($raw, true) : null;
+
+    return (is_array($db) ? $db : []) + ['events' => [], 'idempotency' => [], 'log' => [], 'denied' => [], 'stale' => []];
+}
+
+/** @param array<string, mixed> $db */
+function calendarStubSave(array $db): void
+{
+    @mkdir(__DIR__ . '/stub/state', 0777, true);
+    file_put_contents(__DIR__ . '/stub/state/calendar.json', json_encode($db, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX);
+}
+
+/**
+ * What Voice sent Calendar, oldest first.
+ *
+ * @return list<array<string, mixed>>
+ */
+function calendarRequests(?string $method = null, ?string $pathPrefix = null): array
+{
+    return array_values(array_filter(
+        calendarStub()['log'],
+        static fn (array $r): bool => ($method === null || $r['method'] === $method)
+            && ($pathPrefix === null || str_starts_with((string) $r['path'], $pathPrefix)),
+    ));
+}
+
+/**
+ * Something already in a person's diary — written by another product, or by
+ * them. Returns the event id.
+ *
+ * @param array<string, mixed> $extra
+ */
+function calendarSeedEvent(string $subscriber, string $startIso, string $endIso, array $extra = []): string
+{
+    $db = calendarStub();
+    $id = $extra['id'] ?? Uuid::v4();
+    $db['events'][$id] = $extra + [
+        'id' => $id, 'title' => 'Busy', 'description' => '', 'start_at' => $startIso, 'end_at' => $endIso,
+        'all_day' => false, 'timezone' => 'UTC', 'category' => 'meeting', 'priority' => 'normal',
+        'status' => 'confirmed', 'busy_status' => 'busy', 'visibility' => 'default',
+        'reminder_offset_minutes' => null, 'recurrence_rule' => null, 'source' => 'aicountly_native',
+        'source_app' => 'appointments', 'source_app_verified' => true, 'source_ref' => 'booking-' . substr($id, 0, 8),
+        'created_by_kind' => 'service', 'created_by_app' => 'appointments', 'updated_by_app' => 'appointments',
+        'managed_by_app' => true, 'version' => 1, 'created_at' => gmdate('Y-m-d\TH:i:s\Z'),
+        'updated_at' => gmdate('Y-m-d\TH:i:s\Z'), 'is_compliance' => false, '_subscriber' => $subscriber,
+    ];
+    calendarStubSave($db);
+
+    return $id;
+}
+
+/** Change one event in the stub, as somebody else would have in Calendar. */
+function calendarStubEdit(string $eventId, array $changes): void
+{
+    $db = calendarStub();
+    $db['events'][$eventId] = $changes + $db['events'][$eventId];
+    calendarStubSave($db);
+}
+
+/** Mark people the stub treats as not members of the company (denied) or with a stale external calendar. */
+function calendarStubFlag(string $list, array $subscribers): void
+{
+    $db = calendarStub();
+    $db[$list] = array_values($subscribers);
+    calendarStubSave($db);
+}
+
+/**
+ * Run the recovery worker the way cron does — a separate process — after
+ * making every open operation due now.
+ */
+function runRecovery(): string
+{
+    Db::run("UPDATE voice_external_operations SET next_check_at = NOW() - INTERVAL '1 minute'
+              WHERE status IN ('pending', 'unknown', 'deferred')");
+
+    return (string) shell_exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__DIR__ . '/../bin/call-recovery.php') . ' 2>&1');
+}
+
+/** The newest diary operation for a callback. @return array<string, mixed>|null */
+function lastDiaryOperation(int $callbackId): ?array
+{
+    return Db::first(
+        "SELECT * FROM voice_external_operations WHERE callback_id = :id AND target_app = 'calendar'
+          ORDER BY operation_id DESC LIMIT 1",
+        ['id' => $callbackId],
+    );
+}

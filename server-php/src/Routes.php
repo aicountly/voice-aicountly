@@ -79,6 +79,7 @@ final class Routes
         // Callbacks
         // -------------------------------------------------------------------
         $router->get('/v1/callbacks', [CallbacksController::class, 'index']);
+        $router->get('/v1/callbacks/diary-check', [CallbacksController::class, 'diaryCheck']);
         $router->post('/v1/callbacks', [CallbacksController::class, 'create']);
         $router->put('/v1/callbacks/{id}', [CallbacksController::class, 'update']);
 

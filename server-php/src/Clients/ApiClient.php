@@ -37,16 +37,33 @@ abstract class ApiClient
     protected const TOTAL_TIMEOUT_REQUIRED   = 20;
 
     /**
-     * Per-request memo of GET responses, keyed by method+url.
+     * Per-request memo of GET responses, keyed by method+url and the identity
+     * the request was made as.
      *
      * This is deliberately process-local and dies with the request. It exists so
      * one screen that needs the same item list in three places costs one call,
      * not three — never so a later request can skip asking. Nothing here is
      * written to disk or to the database.
      *
+     * The identity is part of the key because a service-key call names its
+     * person in X-Actor-Uuid, not in Authorization: keyed on the URL alone, a
+     * read for one agent would be answered with the previous agent's.
+     *
      * @var array<string, array{ok:bool, status:int, body:?array, error:?string}>
      */
     private array $memo = [];
+
+    /**
+     * Whether GET answers may be reused within the request at all.
+     *
+     * A client whose reads decide writes — Calendar's lookup before a resend,
+     * its free/busy before a booking — turns this off: an answer from earlier
+     * in the same request may already be wrong.
+     */
+    protected function memoises(): bool
+    {
+        return true;
+    }
 
     /** Product name this client talks to: calendar | contacts | manage | crm | pay | … */
     abstract public function service(): string;
@@ -123,8 +140,9 @@ abstract class ApiClient
         }
 
         $url = $this->apiRoot() . '/' . ltrim($path, '/');
-        $memoKey = $method . ' ' . $url . ' ' . ($headers['Authorization'] ?? '');
-        if ($method === 'GET' && isset($this->memo[$memoKey])) {
+        $memoKey = $method . ' ' . $url . ' ' . self::identityOf($headers);
+        $memoise = $method === 'GET' && $this->memoises();
+        if ($memoise && isset($this->memo[$memoKey])) {
             return $this->memo[$memoKey];
         }
 
@@ -186,11 +204,28 @@ abstract class ApiClient
             $this->log('error', $path, $status, $ms, null);
         }
 
-        if ($method === 'GET') {
+        if ($memoise) {
             $this->memo[$memoKey] = $result;
         }
 
         return $result;
+    }
+
+    /**
+     * Who a request was made as, for the memo key: the session, the service
+     * key, the person it names and the company it acts for. Hashed, so no
+     * credential sits in a key even in memory.
+     *
+     * @param array<string, string> $headers
+     */
+    private static function identityOf(array $headers): string
+    {
+        $identity = [];
+        foreach (['Authorization', 'X-Service-Key', 'X-Actor-Uuid', 'X-Tenant-Ref'] as $name) {
+            $identity[] = $headers[$name] ?? '';
+        }
+
+        return hash('sha256', implode("\n", $identity));
     }
 
     /**
