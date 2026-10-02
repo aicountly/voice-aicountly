@@ -109,6 +109,9 @@ with the signed-in user's own session: Pulse picks the model from Console,
 enforces the daily AI allowance and reports usage per feature (`call.summary`).
 Voice holds no model key, calls no model provider and has no fallback model —
 when Pulse cannot answer, the rule-based path does, and the screen says so.
+That statement covers THIS repository only: the separate Voice Gateway keeps its
+own speech/AI vendor keys for now — see
+[docs/VOICE_GATEWAY_AI_BOUNDARY.md](docs/VOICE_GATEWAY_AI_BOUNDARY.md).
 
 A consequential action — booking, rescheduling, taking a payment — can never be
 configured as merely "allowed"; the server forces it to require caller
