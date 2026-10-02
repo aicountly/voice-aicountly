@@ -1324,18 +1324,31 @@ T::group('25. AI runs through AI Pulse');
         'the unauthenticated health check does not ask Pulse without a service key, and says so');
 
     // --- Where Pulse lives ---------------------------------------------------------
-    $origin = static function (?string $configured, string $host): string {
+    // The origin follows the CONFIGURED environment; the request's Host is a
+    // claim and must change nothing (G18#25).
+    $origin = static function (?string $configured, string $environment, string $host): string {
         putenv($configured === null ? 'PULSE_API_ORIGIN' : 'PULSE_API_ORIGIN=' . $configured);
+        putenv('AIC_ENVIRONMENT=' . $environment);
         $_SERVER['HTTP_HOST'] = $host;
 
         return (new PulseAiClient())->origin();
     };
-    T::same('https://pulse.aicountly.com', $origin(null, 'voice.aicountly.com'), 'production Voice uses production Pulse');
-    T::same('https://pulse.gh.aicountly.com', $origin(null, 'voice.gh.aicountly.com'), 'sandbox Voice uses pulse.gh.aicountly.com');
-    T::same('https://pulse.gh.aicountly.com', $origin(null, 'localhost:8000'), 'as does localhost');
-    T::same('https://pulse.example.test', $origin('https://pulse.example.test/api/', 'voice.aicountly.com'),
+    T::same('https://pulse.aicountly.com', $origin(null, 'production', 'voice.aicountly.com'), 'production Voice uses production Pulse');
+    T::same('https://pulse.gh.aicountly.com', $origin(null, 'sandbox', 'voice.gh.aicountly.com'), 'sandbox Voice uses pulse.gh.aicountly.com');
+    T::same('https://pulse.gh.aicountly.com', $origin(null, 'local', 'localhost:8000'), 'as does a local deployment');
+    T::same('https://pulse.aicountly.com', $origin(null, 'production', 'x.gh.aicountly.com'),
+        'a production deployment asked with a sandbox Host header still uses production Pulse');
+    T::same('https://pulse.aicountly.com', $origin(null, 'production', 'localhost'),
+        'and a Host of localhost changes nothing either');
+    T::same('', $origin(null, 'not-an-environment', 'voice.aicountly.com'),
+        'an unrecognised environment picks no Pulse at all rather than guessing');
+    $unconfigured = (new PulseAiClient())->status('a-session');
+    T::ok(!$unconfigured['ok'] && $unconfigured['code'] === 'not_configured',
+        'and a call is refused as not configured, without reaching anybody');
+    T::same('https://pulse.example.test', $origin('https://pulse.example.test/api/', 'production', 'voice.aicountly.com'),
         'PULSE_API_ORIGIN wins, with a trailing /api ignored');
     putenv('PULSE_API_ORIGIN');
+    putenv('AIC_ENVIRONMENT');
     unset($_SERVER['HTTP_HOST']);
 
     // --- Nothing is left that could reach a model provider ---------------------
@@ -1370,6 +1383,52 @@ T::group('25. AI runs through AI Pulse');
 
     AiClient::useClientForTesting(null);
     Features::overrideForTesting(null);
+}
+
+// ===========================================================================
+T::group('26. Sibling hosts come from configuration, never from the request (G18#25)');
+// ===========================================================================
+{
+    // LOBBY_API_BASE is not set by the test .env, so this client shows what
+    // the environment alone decides.
+    $base = static function (string $environment, string $host): string {
+        putenv('AIC_ENVIRONMENT=' . $environment);
+        $_SERVER['HTTP_HOST'] = $host;
+
+        return (new \Aicountly\Api\Clients\LobbyClient())->base();
+    };
+
+    T::same('https://lobby.aicountly.com', $base('production', 'voice.aicountly.com'), 'production talks to production');
+    T::same('https://lobby.aicountly.com', $base('production', 'evil.gh.aicountly.com'),
+        'a forged sandbox Host on production still talks to production');
+    T::same('https://lobby.aicountly.com', $base('production', ''), 'and so does a CLI worker with no Host at all');
+    T::same('https://lobby.gh.aicountly.com', $base('sandbox', 'voice.aicountly.com'),
+        'sandbox talks to sandbox whatever the Host says');
+    T::same('', $base('bogus', 'voice.aicountly.com'), 'an unrecognised environment resolves to no host');
+
+    $refused = (new \Aicountly\Api\Clients\LobbyClient())->request('GET', 'health');
+    T::ok(!$refused['ok'] && $refused['error'] === 'environment_not_configured',
+        'and a request is refused without being sent anywhere');
+
+    // An explicit *_API_BASE still wins — that is how the suite reaches its stub.
+    putenv('AIC_ENVIRONMENT=production');
+    T::same(rtrim(Env::get('MANAGE_API_BASE'), '/'), (new \Aicountly\Api\Clients\ManageClient())->base(),
+        'an explicit MANAGE_API_BASE wins over the environment');
+
+    // The Host may make a server refuse, never choose.
+    putenv('AIC_ENVIRONMENT=production');
+    T::ok(\Aicountly\Api\Environment::hostContradicts('voice.gh.aicountly.com'),
+        'a production server refuses a sandbox Host');
+    T::ok(!\Aicountly\Api\Environment::hostContradicts('voice.aicountly.com'), 'but not its own name');
+    T::ok(!\Aicountly\Api\Environment::hostContradicts(''), 'nor a CLI worker with no Host');
+    putenv('AIC_ENVIRONMENT=sandbox');
+    T::ok(\Aicountly\Api\Environment::hostContradicts('voice.aicountly.com'),
+        'a sandbox server refuses a production Host (a .env copied from the production template)');
+    T::ok(!\Aicountly\Api\Environment::hostContradicts('gh-voice.aicountly.com'), 'but not a sandbox name');
+
+    putenv('AIC_ENVIRONMENT');
+    unset($_SERVER['HTTP_HOST']);
+    T::same('local', \Aicountly\Api\Environment::current(), 'with AIC_ENVIRONMENT unset, APP_ENV decides');
 }
 
 exit(T::summary());

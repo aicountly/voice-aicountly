@@ -250,10 +250,15 @@ without it. The ones with no safe default:
 - `VOICE_GATEWAY_URL` / `VOICE_GATEWAY_KEY` — no gateway means no browser
   calling and no live transcription, and the UI says so rather than showing
   controls that do nothing.
+- `AIC_ENVIRONMENT` — `production`, `sandbox` or `local` (falls back to
+  `APP_ENV`). It alone decides which Manage, Contacts, CRM, Calendar, Pay and
+  AI Pulse this API talks to; the request's Host header is never consulted.
+  Unset or unrecognised, Voice calls no other product at all and
+  `/api/health` says why.
 - `VOICE_AI_ENABLED` — off means no AI: the deterministic paths answer
   instead and the screen says the result is rule-based. On, AI runs through
   AI Pulse with the user's own session; there is no model key to set.
-  `PULSE_API_ORIGIN` is derived from the host unless set, and
+  `PULSE_API_ORIGIN` follows `AIC_ENVIRONMENT` unless set, and
   `PULSE_SERVICE_KEY` is needed only for AI a service caller (no user session)
   starts.
 

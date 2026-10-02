@@ -25,7 +25,9 @@ final class Health
             'data' => [
                 'status'   => $database['ok'] ? 'ok' : 'degraded',
                 'app'      => 'Voice',
-                'env'      => Env::get('APP_ENV', 'unknown'),
+                // From configuration (Environment), never from this request's
+                // Host. "not_configured" means no sibling is called at all.
+                'env'      => Environment::current() ?? 'not_configured',
                 'time'     => Clock::iso(Clock::now()),
                 'database' => $database,
                 'capabilities' => Features::all(),
@@ -56,6 +58,9 @@ final class Health
     private static function unconfigured(): array
     {
         $out = [];
+        if (Environment::current() === null) {
+            $out['ENVIRONMENT'] = Environment::explainUnconfigured();
+        }
         foreach (Features::all() as $flag => $enabled) {
             if (!$enabled) {
                 $out[$flag] = (string) Features::explain($flag);
