@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Aicountly\Api;
 
+use Aicountly\Api\Controllers\AiActionsController;
 use Aicountly\Api\Controllers\AiAgentsController;
 use Aicountly\Api\Controllers\CallbacksController;
 use Aicountly\Api\Controllers\CallFlowsController;
@@ -74,11 +75,15 @@ final class Routes
         $router->get('/v1/calls/{id}/summary', [IntelligenceController::class, 'summary']);
         $router->post('/v1/calls/{id}/summary', [IntelligenceController::class, 'editSummary']);
         $router->post('/v1/calls/{id}/review', [IntelligenceController::class, 'review']);
+        // An AI agent's action step on a live call. The Voice Gateway's key
+        // only; see AiActionsController.
+        $router->post('/v1/calls/{id}/ai-actions', [AiActionsController::class, 'run']);
 
         // -------------------------------------------------------------------
         // Callbacks
         // -------------------------------------------------------------------
         $router->get('/v1/callbacks', [CallbacksController::class, 'index']);
+        $router->get('/v1/callbacks/diary-check', [CallbacksController::class, 'diaryCheck']);
         $router->post('/v1/callbacks', [CallbacksController::class, 'create']);
         $router->put('/v1/callbacks/{id}', [CallbacksController::class, 'update']);
 

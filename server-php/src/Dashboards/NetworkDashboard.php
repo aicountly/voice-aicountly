@@ -278,6 +278,7 @@ final class NetworkDashboard extends Dashboard
 
         $apps = [
             'calendar'  => 'Aicountly Calendar',
+            'appointments' => 'Aicountly Appointments',
             'contacts'  => 'Aicountly Contacts',
             'crm'       => 'Aicountly CRM',
             'pay'       => 'Aicountly Pay',

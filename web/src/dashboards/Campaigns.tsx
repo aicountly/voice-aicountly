@@ -29,7 +29,7 @@ import { DashboardFrame, useDashboard } from './frame'
 interface Panels {
   campaigns: Campaign[]
   funnel: Array<{ key: string; label: string; count: number; percent: number | null }>
-  modes: Array<{ key: string; label: string; available: boolean; reason: string | null }>
+  modes: Array<{ key: string; label: string; available: boolean; reason: string | null; limitation?: string | null }>
   budget: BudgetStatus[]
   callback_planner: Array<{ slot: string; due: number; priority: string }>
   planner: { drafts_only: boolean; note: string }
@@ -181,7 +181,7 @@ export default function Campaigns() {
                   <Row
                     key={mode.key}
                     title={mode.label}
-                    detail={mode.available ? undefined : mode.reason}
+                    detail={mode.available ? mode.limitation ?? undefined : mode.reason}
                     trailing={
                       mode.available ? (
                         <Badge><CheckCircle2 size={11} aria-hidden="true" />Available</Badge>

@@ -66,15 +66,21 @@ prefixed `voice_`, and that exactly one PDO connection exists in the codebase.
 
 ### An unconfirmed write is never reported as done
 
-The case this is built for: an AI agent asks Calendar to create a booking
-mid-call and the request times out. Voice knows it sent the request and does not
+The case this is built for: Voice asks Calendar to put a callback in an agent's
+diary and the request times out. Voice knows it sent the request and does not
 know whether Calendar acted on it.
 
-`voice_external_operations` records that as `unknown` — not succeeded, not
-failed, and never retried blindly. `bin/call-recovery.php` settles it by asking
-Calendar what it holds against the correlation id Voice sent. Only an
-authoritative acknowledgement produces `succeeded`. A 2xx carrying no identifier
-is treated as unknown too, because a booking nobody can link to is not a booking.
+`voice_external_operations` records every write BEFORE it is sent — its own
+`Idempotency-Key`, the exact request, the diary owner and the `source_ref` — and
+records a timeout as `unknown`: not succeeded, not failed, and never retried
+blindly. `bin/call-recovery.php` settles it under Calendar's v1 contract: it
+looks the entry up by `source_ref`, as the owner it was written for, adopts what
+Calendar holds, and only when Calendar holds nothing sends the SAME attempt
+again under the same key, which Calendar replays rather than repeats. A lookup
+that keeps failing leaves it unknown, asked again later. Only Calendar's event
+id and version produce `succeeded`; a 2xx without them is unknown too, because an
+entry nobody can address is not an entry. (CRM and Pay writes keep their own
+reconciliation reads, which are not part of that contract.)
 
 The UI carries this through: a call whose outcome the provider did not confirm
 removes the Call button rather than inviting a second dial at a member of the
@@ -115,6 +121,17 @@ configured as merely "allowed"; the server forces it to require caller
 confirmation. An action outside the allowlist is denied whatever the
 configuration says. A transcript is untrusted input: a caller saying "ignore your
 previous instructions" is a caller saying an odd sentence.
+
+An action step is only publishable when something carries it out
+(`src/Domain/AiActions.php`). Booking runs through Aicountly Appointments, which
+owns every customer booking (`src/Domain/AppointmentsBooking.php`, behind
+`VOICE_APPOINTMENTS_ENABLED`, off by default): the agent says "booked" only with
+Appointments' booking id and reference in hand, one Idempotency-Key per intent,
+and a lost answer is read back rather than resent blind. Moving or cancelling a
+booking, payment links and tasks have no supported executor yet — such steps do
+not publish, and an agent that reaches one creates a callback and says it is
+passing the request to the team. The Voice Gateway runs these steps through
+`POST /v1/calls/{id}/ai-actions` (docs/DEPLOYMENT.md, "Aicountly Appointments").
 
 ### Policies are the business's, not this product's claims
 
@@ -204,7 +221,7 @@ second line of defence behind it.
 ## Tests
 
 ```bash
-server-php/tests/run.sh      # 203 assertions against a real PostgreSQL
+server-php/tests/run.sh      # 393 assertions against a real PostgreSQL
 cd web && npm run test:ui    # frontend unit tests
 ```
 
@@ -212,12 +229,19 @@ The suite drives the real controllers through the real router with an adopted
 identity, so permission checks are exercised rather than bypassed. A local stub
 stands in for Manage, Contacts, Calendar, CRM and the gateway, and AI Pulse is
 faked at the client's transport: **no test places a call, launches a campaign,
-writes to a real product or reaches a model.**
+writes to a real product or reaches a model.** The Calendar part of the stub
+(`tests/stub/calendar_v1.php`) is written from Calendar's Events API v1
+contract, not from Voice's client — idempotent replay, the source_ref natural
+key, If-Match, own-app 404s, half-open conflicts, strict-mode 422s — so the
+diary tests prove Voice against the contract rather than against itself.
 
 What it covers: tenant isolation including a transcript read across companies,
 permission enforcement per surface, duplicate and out-of-order provider events,
-idempotent call creation, the timed-out external write, Calendar and Contacts
-failures creating no local mirror, provider capability gating, webhook signature
+idempotent call creation, the timed-out external write and its reconciliation
+by lookup and same-key resend, callback diary entries on the wire (the assigned
+agent's diary, no customer text, create/reschedule/cancel/reassign, refusals,
+deferred and unknown outcomes), Calendar and Contacts failures creating no local
+mirror, provider capability gating, webhook signature
 and replay, campaign pause and duplicate-dial prevention, launch readiness, AI
 action permissions, flow validation, publish gating and version immutability,
 budget and concurrency enforcement, calling windows across timezones, retention

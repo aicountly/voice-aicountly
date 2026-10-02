@@ -68,7 +68,7 @@ foreach (['Sales IVR', 'Support IVR', 'Billing IVR'] as $name) {
                                'action' => 'check_availability', 'next' => 'confirm', 'on_failure' => 'handover'],
                 'confirm'  => ['type' => 'confirm', 'label' => 'Repeat the details back',
                                'timeout_seconds' => 10, 'next' => 'book', 'timeout' => 'handover'],
-                'book'     => ['type' => 'api_action', 'label' => 'Book through Calendar',
+                'book'     => ['type' => 'api_action', 'label' => 'Book through Appointments',
                                'action' => 'create_booking', 'next' => 'recap', 'on_failure' => 'handover'],
                 'recap'    => ['type' => 'knowledge', 'label' => 'Recap the confirmed outcome', 'next' => 'bye'],
                 'handover' => ['type' => 'handover', 'label' => 'Escalate to a team member', 'destination' => 'Support'],

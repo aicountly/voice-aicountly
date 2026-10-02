@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 /**
- * A stand-in for Manage, Contacts, Calendar, CRM and the voice gateway.
+ * A stand-in for Manage, Contacts, Calendar, Appointments, CRM and the voice gateway.
  *
  * The test suite must never call a real product. This answers the handful of
  * endpoints Voice actually uses, and — more usefully — can be told to FAIL, so
@@ -12,8 +12,10 @@ declare(strict_types=1);
  *
  * Behaviour is driven by files in tests/stub/state/, written by the test:
  *
- *   calendar=down      → Calendar answers 503
- *   calendar=timeout   → Calendar answers 500 with no body (an unknown outcome)
+ *   calendar=…         → see calendar_v1.php: down, timeout, commit_then_drop,
+ *                        in_progress, schema_not_ready, reject_key, pre_v1
+ *   appointments=…     → see appointments_v1.php: down, timeout, drop_once,
+ *                        commit_then_drop, reject_key, lookup_down, calendar_down
  *   contacts=down      → Contacts answers 503
  *   crm=down           → CRM answers 503
  *
@@ -55,7 +57,14 @@ $body = json_decode((string) file_get_contents('php://input'), true) ?: [];
 // Health — used by the integrations probe
 // ---------------------------------------------------------------------------
 if ($path === 'health') {
-    stub_json(200, ['status' => 'ok', 'stub' => true]);
+    // Calendar v1 reports its contract version here (and in a header); a
+    // pre-v1 Calendar does not, which is what its switch reproduces.
+    if (stub_mode('calendar') === 'pre_v1') {
+        stub_json(200, ['status' => 'ok', 'stub' => true]);
+    }
+    header('X-Calendar-Contract: 1');
+    stub_json(200, ['status' => 'ok', 'stub' => true, 'contract_version' => 1, 'success' => true,
+        'data' => ['status' => 'ok', 'contract_version' => 1]]);
 }
 
 // ---------------------------------------------------------------------------
@@ -137,37 +146,19 @@ if (str_starts_with($path, 'contacts')) {
 }
 
 // ---------------------------------------------------------------------------
-// Calendar
+// Calendar — the Events API v1, from its contract (see calendar_v1.php)
 // ---------------------------------------------------------------------------
-if (str_starts_with($path, 'calendar/events')) {
-    $mode = stub_mode('calendar');
+if (str_starts_with($path, 'calendar/')) {
+    require __DIR__ . '/calendar_v1.php';
+    calendar_v1($method, $path, $body);
+}
 
-    if ($mode === 'down') {
-        stub_json(503, ['message' => 'Calendar is unavailable.']);
-    }
-
-    if ($mode === 'timeout') {
-        // A 500 with no useful body: the caller cannot tell whether the event
-        // was created. This is the case ExternalOperations calls UNKNOWN.
-        http_response_code(500);
-        exit;
-    }
-
-    if ($method === 'POST') {
-        stub_json(201, ['data' => [
-            'event_uuid'     => 'stub-event-' . substr(hash('sha256', (string) ($body['correlation_id'] ?? '')), 0, 12),
-            'correlation_id' => $body['correlation_id'] ?? null,
-        ]]);
-    }
-
-    // The reconciliation read. 'reconcile-yes' is a correlation id the owner
-    // turns out to have; anything else it does not.
-    $correlationId = (string) ($_GET['correlation_id'] ?? '');
-    if (str_contains($correlationId, 'reconcile-yes')) {
-        stub_json(200, ['data' => [['event_uuid' => 'stub-event-reconciled', 'correlation_id' => $correlationId]]]);
-    }
-
-    stub_json(200, ['data' => []]);
+// ---------------------------------------------------------------------------
+// Appointments — the partner API, from its routes (see appointments_v1.php)
+// ---------------------------------------------------------------------------
+if (str_starts_with($path, 'v1/')) {
+    require __DIR__ . '/appointments_v1.php';
+    appointments_v1($method, $path, $body);
 }
 
 // ---------------------------------------------------------------------------
