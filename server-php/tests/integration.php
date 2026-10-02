@@ -2288,4 +2288,41 @@ T::group('33. Command Centre says "Connected" only after a real probe');
     stubReset();
 }
 
+// ===========================================================================
+T::group('34. Campaigns say what an agent or a reminder cannot do');
+// ===========================================================================
+{
+    $ctx = scope(CMP, $owner);
+    $campaign = static fn (string $mode, array $extra = []): int => (int) Db::insert('voice_campaigns', $extra + [
+        'cmp_id' => CMP, 'name' => 'Honesty ' . $mode . ' ' . substr(Uuid::v4(), 0, 6), 'mode' => $mode, 'status' => 'draft',
+        'timezone' => 'UTC', 'window_start_min' => 0, 'window_end_min' => 1440, 'window_days' => [0, 1, 2, 3, 4, 5, 6],
+        'script' => ['body' => 'This is a reminder from the clinic.', 'reviewed' => true, 'audience_purpose' => 'Existing appointments'],
+    ], 'campaign_id');
+    $checkOf = static function (array $validation, string $key): array {
+        foreach ($validation['checks'] as $check) {
+            if ($check['key'] === $key) {
+                return $check;
+            }
+        }
+
+        return [];
+    };
+
+    $reminder = $checkOf(CampaignService::validate($ctx, $campaign('appointment_reminder')), 'appointment_source');
+    T::same(['warn', CampaignService::REMINDER_LIMITATION], [$reminder['status'] ?? null, $reminder['message'] ?? null],
+        'an appointment reminder campaign states that nothing reads the appointment (voice-aicountly-F16)');
+
+    $booker = (int) Db::scalar("SELECT ai_agent_id FROM voice_ai_agents WHERE cmp_id = :c AND name = 'Booker'", ['c' => CMP]);
+    $aiCampaign = $campaign('ai_conversation', ['ai_agent_id' => $booker]);
+    T::same('pass', $checkOf(CampaignService::validate($ctx, $aiCampaign), 'script')['status'] ?? null,
+        'an agent whose booking steps Appointments carries out may run a campaign');
+    putenv('VOICE_APPOINTMENTS_ENABLED=0');
+    Features::overrideForTesting(null);
+    $off = $checkOf(CampaignService::validate($ctx, $aiCampaign), 'script');
+    T::ok(($off['status'] ?? null) === 'error' && str_contains((string) ($off['message'] ?? ''), 'has a step nothing carries out here'),
+        'with Appointments off, the same published agent cannot launch a campaign (F5)');
+    putenv('VOICE_APPOINTMENTS_ENABLED');
+    Features::overrideForTesting(null);
+}
+
 exit(T::summary());

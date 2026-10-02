@@ -565,6 +565,21 @@ final class AiAgentService
         return array_values(array_filter(array_map('trim', explode(',', $raw))));
     }
 
+    /**
+     * The flow a published agent version follows, as it is now.
+     *
+     * @return array<string, mixed>|null
+     */
+    public static function publishedFlow(Context $ctx, int $versionId): ?array
+    {
+        $flowId = Db::scalar(
+            'SELECT flow_id FROM voice_ai_agent_versions WHERE version_id = :id AND cmp_id = :cmp',
+            ['id' => $versionId, 'cmp' => $ctx->cmpId],
+        );
+
+        return $flowId === null ? null : self::flowDefinition($ctx, (int) $flowId);
+    }
+
     /** @return array<string, mixed>|null */
     private static function flowDefinition(Context $ctx, int $flowId): ?array
     {
