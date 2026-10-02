@@ -53,6 +53,12 @@ final class CampaignService
     public const ACTIVE_STATES = ['scheduled', 'running'];
 
     /**
+     * What an appointment reminder campaign cannot do yet. Appointments owns the
+     * appointment; Voice has no live read of it at dial time.
+     */
+    public const REMINDER_LIMITATION = 'Voice does not read the appointment it reminds about: the script is typed in advance, so an appointment moved in Aicountly Appointments is still announced as written, and a cancelled one is still called. Keep times out of the script.';
+
+    /**
      * Launch readiness.
      *
      * Every check is CONFIGURABLE and each one names what is missing. There is
@@ -172,6 +178,10 @@ final class CampaignService
 
         // --- script / agent ---------------------------------------------------
         $checks[] = self::scriptCheck($ctx, $campaign);
+        if ((string) $campaign['mode'] === 'appointment_reminder') {
+            // Said, not hidden: nothing in Voice reads the appointment yet.
+            $checks[] = self::check('appointment_source', 'warn', self::REMINDER_LIMITATION);
+        }
 
         // --- budget and capacity ----------------------------------------------
         $budget = BudgetService::check($ctx, $campaignId);
@@ -713,6 +723,17 @@ final class CampaignService
             }
             if ((string) $agent['status'] !== 'published' || $agent['published_version_id'] === null) {
                 return self::check('script', 'error', 'The AI agent has no published version.');
+            }
+
+            // A version published before a step's executor was switched off
+            // (or before Voice checked) still names it: rechecked here, now.
+            $flow = AiAgentService::publishedFlow($ctx, (int) $agent['published_version_id']);
+            foreach ($flow['nodes'] ?? [] as $node) {
+                $action = is_array($node) && ($node['type'] ?? '') === 'api_action' ? (string) ($node['action'] ?? '') : '';
+                $unavailable = $action === '' ? null : AiActions::unavailableReason($action);
+                if ($unavailable !== null) {
+                    return self::check('script', 'error', 'The published AI agent has a step nothing carries out here: ' . $unavailable);
+                }
             }
 
             return self::check('script', 'pass', 'Using the published AI agent version.');

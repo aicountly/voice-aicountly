@@ -1,10 +1,13 @@
 /**
  * The callback queue.
  *
- * A callback is Voice's own plan to ring somebody back. Where one also occupies
- * time in a diary, `calendar_event_ref` points at the event IN CALENDAR — the
- * time is read from there, never stored here, so it does not go stale when
- * somebody moves it.
+ * A callback is Voice's own plan to ring somebody back, and its due time is
+ * kept here. When asked, that time is also blocked in Aicountly Calendar: a
+ * busy entry in the assigned agent's diary (the creator's when nobody is
+ * assigned), which Voice moves or cancels with the callback. The entry carries
+ * no customer detail and is not a reminder. This page says exactly that, and
+ * shows what Calendar last told Voice about each entry — never a "synced" it
+ * cannot back.
  */
 
 import { useCallback, useState } from 'react'
@@ -14,12 +17,32 @@ import { useVoice } from '../context/VoiceContext'
 import { useApi, useMutation } from '../hooks/useApi'
 import { useUrlState } from '../hooks/useUrlState'
 import { api } from '../services/api'
-import type { Callback, ListResponse } from '../services/types'
+import type { Callback, CallbackDiary, DiaryCheck, ListResponse } from '../services/types'
 import { PageHeader } from '../shell/AppShell'
 import {
   Badge, Button, Card, Drawer, EmptyState, Field, Notice, PanelState, Row, Select,
-  StatusPill, formatDateTime,
+  StatusPill, formatDateTime, formatTime,
 } from '../ui'
+
+/** Whether this deployment has Calendar switched on, from the queue's meta. Configured, not proven. */
+interface CalendarSwitch {
+  enabled: boolean
+  reason: string | null
+}
+
+/** A few words per diary state. The backend's own sentence follows them. */
+const DIARY_LABEL: Record<CallbackDiary['state'], string> = {
+  none: '',
+  linked: 'In the diary',
+  pending: 'Diary entry being written',
+  unknown: 'Diary entry not confirmed yet',
+  deferred: 'Diary entry waiting on Calendar',
+  refused: 'Not in the diary',
+  failed: 'Not in the diary',
+  cancelled: 'Diary entry cancelled',
+  not_connected: 'Not in the diary',
+  legacy: 'Diary entry unverified',
+}
 
 export default function Callbacks() {
   const { timezone, can, company, branchId } = useVoice()
@@ -30,6 +53,7 @@ export default function Callbacks() {
     (signal) => api.get('v1/callbacks', { status: filters.status, overdue: filters.overdue, limit: 100 }, signal),
     [company?.cmp_id, branchId, filters.status, filters.overdue],
   )
+  const calendar = (state.data?.meta.calendar ?? null) as CalendarSwitch | null
 
   return (
     <>
@@ -73,23 +97,30 @@ export default function Callbacks() {
             state={state}
             what="callbacks"
             isEmpty={(data) => data.data.length === 0}
-            empty={<EmptyState title="Nothing to call back" body="Callbacks appear here when a caller asks for one or a call goes unanswered." />}
+            empty={
+              <EmptyState
+                title="Nothing to call back"
+                body="A callback appears here when someone creates one — with New callback, or from a product connected to Voice."
+              />
+            }
           >
             {(data) => (
               <>
                 {data.data.map((callback) => (
                   <Row
                     key={callback.callback_id}
-                    title={callback.e164_masked}
+                    title={`#${callback.callback_id} · ${callback.e164_masked}`}
                     detail={
                       <>
                         {callback.reason || 'No reason recorded'}
                         {callback.due_at ? ` · due ${formatDateTime(callback.due_at, timezone)}` : ' · no due time'}
+                        {callback.due_at && callback.exact_time ? ' (time promised to the caller)' : ''}
                         {callback.attempts > 0 ? ` · ${callback.attempts} of ${callback.max_attempts} attempts` : ''}
-                        {callback.calendar_event_ref ? (
+                        {/* Optional: an API deployed a moment before this page has no `calendar` yet. */}
+                        {callback.calendar && (callback.calendar.state !== 'none' || callback.calendar.detail) ? (
                           <span style={{ display: 'block', marginTop: 2 }}>
                             <CalendarClock size={11} aria-hidden="true" style={{ verticalAlign: -1, marginRight: 3 }} />
-                            In a diary in Aicountly Calendar
+                            {[DIARY_LABEL[callback.calendar.state], callback.calendar.detail].filter(Boolean).join(' — ')}
                           </span>
                         ) : null}
                       </>
@@ -113,26 +144,44 @@ export default function Callbacks() {
         </Card>
       </div>
 
-      {creating ? <NewCallback onClose={() => setCreating(false)} onCreated={state.reload} /> : null}
+      {creating ? (
+        <NewCallback calendar={calendar} timezone={timezone} onClose={() => setCreating(false)} onCreated={state.reload} />
+      ) : null}
     </>
   )
 }
 
-function NewCallback({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
+function NewCallback({ calendar, timezone, onClose, onCreated }: {
+  calendar: CalendarSwitch | null
+  timezone: string
+  onClose: () => void
+  onCreated: () => void
+}) {
   const [number, setNumber] = useState('')
   const [reason, setReason] = useState('')
   const [dueAt, setDueAt] = useState('')
   const [withCalendar, setWithCalendar] = useState(false)
+  const [exactTime, setExactTime] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
+  const [diary, setDiary] = useState<DiaryCheck | null>(null)
+
+  // Unknown (the queue did not load) is not "off": the server answers for itself.
+  const calendarOff = calendar !== null && !calendar.enabled
+  const dueIso = dueAt ? new Date(dueAt).toISOString() : null
 
   const create = useMutation(() =>
     api.post<{ data: Callback; message: string | null }>('v1/callbacks', {
       e164: number.trim(),
       reason: reason.trim(),
       // Sent as UTC. The picker is local; the wire is not.
-      due_at: dueAt ? new Date(dueAt).toISOString() : null,
-      create_calendar_event: withCalendar,
+      due_at: dueIso,
+      exact_time: dueIso !== null && withCalendar && exactTime,
+      create_calendar_event: withCalendar && !calendarOff,
     }),
+  )
+
+  const check = useMutation(() =>
+    api.get<{ data: DiaryCheck }>('v1/callbacks/diary-check', { due_at: dueIso }),
   )
 
   const onSave = useCallback(async () => {
@@ -145,6 +194,12 @@ function NewCallback({ onClose, onCreated }: { onClose: () => void; onCreated: (
       else onClose()
     }
   }, [create, onCreated, onClose])
+
+  const onCheck = useCallback(async () => {
+    setDiary(null)
+    const result = await check.mutate()
+    if (result) setDiary(result.data)
+  }, [check])
 
   return (
     <Drawer
@@ -171,17 +226,64 @@ function NewCallback({ onClose, onCreated }: { onClose: () => void; onCreated: (
           <input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="What is this about?" />
         </Field>
         <Field label="Due" hint="Your local time. Stored in UTC.">
-          <input type="datetime-local" value={dueAt} onChange={(event) => setDueAt(event.target.value)} />
+          <input
+            type="datetime-local"
+            value={dueAt}
+            onChange={(event) => {
+              setDueAt(event.target.value)
+              setDiary(null)
+            }}
+          />
         </Field>
 
         <label className="vsplit" style={{ fontSize: 13 }}>
-          <input type="checkbox" checked={withCalendar} onChange={(event) => setWithCalendar(event.target.checked)} />
-          Also put it in my diary
+          <input
+            type="checkbox"
+            checked={withCalendar && !calendarOff}
+            disabled={calendarOff}
+            onChange={(event) => setWithCalendar(event.target.checked)}
+          />
+          Block this time in my Aicountly Calendar diary
         </label>
         <p className="vmuted vsmall" style={{ margin: 0 }}>
-          The diary entry is created in Aicountly Calendar. Voice keeps only its reference, so moving it there moves
-          it everywhere.
+          {calendarOff
+            ? `No diary entry can be made in this deployment: ${calendar?.reason ?? 'Aicountly Calendar is not connected to Voice.'}`
+            : 'Voice adds a 15-minute busy entry, titled only with this callback’s reference (for example “Callback · #42”), to your diary — or to the assigned agent’s, if one is assigned. The phone number, the caller and the reason stay in Voice. Voice moves or cancels the entry when this callback is rescheduled, reassigned or cancelled here; it cannot be moved from Calendar. It is not a reminder: Voice sends none.'}
         </p>
+
+        {withCalendar && !calendarOff ? (
+          <>
+            <label className="vsplit" style={{ fontSize: 13 }}>
+              <input
+                type="checkbox"
+                checked={exactTime}
+                disabled={!dueAt}
+                onChange={(event) => setExactTime(event.target.checked)}
+              />
+              The caller was promised this exact time
+            </label>
+            <p className="vmuted vsmall" style={{ margin: 0 }}>
+              Calendar then refuses the entry if your diary is already busy at that time, instead of double-booking
+              you, and Voice tells you. The callback is saved either way.
+            </p>
+            <div>
+              <Button size="sm" onClick={() => void onCheck()} disabled={!dueAt || check.pending}>
+                {check.pending ? 'Checking…' : 'Check my diary for that time'}
+              </Button>
+            </div>
+            {diary ? (
+              <Notice tone={diary.state === 'free' ? 'info' : 'warning'}>
+                {diary.message}
+                {diary.conflicts.length > 0
+                  ? ` Busy ${diary.conflicts
+                    .map((c) => (c.all_day ? 'all day' : `${formatTime(c.start_at, timezone)}–${formatTime(c.end_at, timezone)}`))
+                    .join(', ')}.`
+                  : ''}
+              </Notice>
+            ) : null}
+            {check.error ? <Notice tone="warning">{check.error.message}</Notice> : null}
+          </>
+        ) : null}
 
         {message ? <Notice tone="warning">{message}</Notice> : null}
         {create.error ? <Notice tone="danger">{create.error.message}</Notice> : null}

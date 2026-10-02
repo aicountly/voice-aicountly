@@ -44,6 +44,14 @@ final class ServicePolicy
             ['GET', '/v1/calls', ['voice.call.view']],
             ['POST', '/v1/calls', ['voice.call.view', 'voice.call.place']],
         ],
+        // The Voice Gateway runs an AI agent's action steps on the call it is
+        // holding. No permission is granted: what an action may do is decided
+        // by the published agent version (Domain\AiActionRunner), not by a
+        // role. A company is reached only when listed for `gateway` in
+        // SERVICE_KEY_COMPANIES, like any product acting with no person.
+        'gateway' => [
+            ['POST', '/v1/calls/{id}/ai-actions', []],
+        ],
     ];
 
     /** The route this request is, normalised to the route table's form (e.g. /v1/calls/{id}). */

@@ -82,7 +82,7 @@ final class AiClient
      * @var array<string, array{label: string, consequential: bool}>
      */
     public const TOOLS = [
-        'check_availability'  => ['label' => 'Check calendar availability', 'consequential' => false],
+        'check_availability'  => ['label' => 'Check appointment availability', 'consequential' => false],
         'lookup_contact'      => ['label' => 'Look up the caller',          'consequential' => false],
         'answer_from_knowledge' => ['label' => 'Answer from knowledge',     'consequential' => false],
         'create_booking'      => ['label' => 'Create a booking',            'consequential' => true],

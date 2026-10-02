@@ -169,16 +169,41 @@ export interface Callback {
   e164_masked: string
   reason: string
   priority: 'high' | 'normal' | 'low'
+  /** The callback's time. Voice's own: a diary entry follows it, never the reverse. */
   due_at: string | null
+  /** The caller was promised this exact time, so the diary entry is refused rather than double-booked. */
+  exact_time: boolean
   assigned_agent_id: number | null
   queue_id: number | null
   status: 'open' | 'scheduled' | 'in_progress' | 'completed' | 'cancelled' | 'failed'
   attempts: number
   max_attempts: number
   last_attempt_at: string | null
-  /** Calendar's id. The event's time is read from Calendar, not stored here. */
+  /** Calendar's id for the diary entry, when there is one. Nothing about the event is kept here. */
   calendar_event_ref: string | null
+  calendar: CallbackDiary
   created_at: string
+}
+
+/**
+ * The callback's diary entry in Aicountly Calendar, as Calendar last answered
+ * Voice. `detail` is the backend's own sentence and is shown as it is.
+ */
+export interface CallbackDiary {
+  requested: boolean
+  state:
+    | 'none' | 'linked' | 'pending' | 'unknown' | 'deferred' | 'refused' | 'failed'
+    | 'cancelled' | 'not_connected' | 'legacy'
+  detail: string | null
+  checked_at: string | null
+}
+
+/** Advisory answer from Calendar's conflict-check, before a time is promised. Never a hold. */
+export interface DiaryCheck {
+  state: 'free' | 'busy' | 'unverified' | 'unavailable' | 'not_connected' | 'no_owner' | 'invalid'
+  message: string
+  conflicts: Array<{ start_at: string; end_at: string; all_day: boolean }>
+  checked_at: string
 }
 
 export interface Campaign {
@@ -260,7 +285,8 @@ export interface AiTestSummary {
 export interface AiCheck {
   key: string
   label: string
-  status: 'passed' | 'failed' | 'not_applicable'
+  /** `not_verified`: a rehearsal could not exercise it, so it is not a pass. */
+  status: 'passed' | 'failed' | 'not_applicable' | 'not_verified'
   detail: string
 }
 
@@ -353,7 +379,11 @@ export interface IntegrationStatus {
   app: string
   label: string
   purpose?: string
-  status: 'not_configured' | 'configured' | 'connected' | 'degraded' | 'unavailable' | 'forbidden'
+  /**
+   * `enabled_unverified`: switched on, but no authenticated probe has proved
+   * Voice's key — the Command Centre never says "connected" from a flag alone.
+   */
+  status: 'not_configured' | 'configured' | 'enabled_unverified' | 'connected' | 'degraded' | 'unavailable' | 'forbidden'
   reason: string | null
   checked_at: string | null
   last_ok_at: string | null

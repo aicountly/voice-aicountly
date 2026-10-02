@@ -40,6 +40,76 @@ final class Idempotency
     /** Keys older than this are housekeeping, not protection. */
     private const RETENTION_DAYS = 7;
 
+    /** response_status of a key claimed by a request that has not answered yet. */
+    private const IN_PROGRESS = 0;
+
+    /** A claim older than this was left by a request that died; it no longer blocks. */
+    private const CLAIM_MINUTES = 5;
+
+    /**
+     * Claim a key BEFORE running the request it protects.
+     *
+     * replay() then remember() is check-then-act: a retry that arrives while
+     * the first request is still running finds no answer and runs again — two
+     * callbacks, and two diary entries for them. Claiming inserts the key
+     * first, as in progress. Whoever inserts it runs; a repeat gets the stored
+     * answer, or, while the first is still running, `in_progress` (answer 409
+     * and let it retry). A request that fails releases its claim so a retry can
+     * run; a claim left by a request that died stops blocking after a few
+     * minutes.
+     *
+     * @return array{status: string, replay: ?array{status: int, body: array<string, mixed>}}
+     *         status: claimed | replay | in_progress | none (no usable key: run unprotected)
+     */
+    public static function claim(Context $ctx, string $scope, ?string $key): array
+    {
+        $key = self::normalise($key);
+        if ($key === null) {
+            return ['status' => 'none', 'replay' => null];
+        }
+        $where = ['cmp' => $ctx->cmpId, 'scope' => $scope, 'key' => $key];
+
+        Db::run(
+            'DELETE FROM ' . self::TABLE . '
+              WHERE cmp_id = :cmp AND scope = :scope AND idempotency_key = :key
+                AND response_status = ' . self::IN_PROGRESS . '
+                AND created_at < NOW() - INTERVAL \'' . self::CLAIM_MINUTES . ' minutes\'',
+            $where,
+        );
+        $claimed = Db::first(
+            'INSERT INTO ' . self::TABLE . ' (cmp_id, scope, idempotency_key, response_status, response_body)
+             VALUES (:cmp, :scope, :key, ' . self::IN_PROGRESS . ', \'{}\'::jsonb)
+             ON CONFLICT (cmp_id, scope, idempotency_key) DO NOTHING
+             RETURNING key_id',
+            $where,
+        );
+        if ($claimed !== null) {
+            return ['status' => 'claimed', 'replay' => null];
+        }
+
+        $replay = self::replay($ctx, $scope, $key);
+
+        return $replay === null
+            ? ['status' => 'in_progress', 'replay' => null]
+            : ['status' => 'replay', 'replay' => $replay];
+    }
+
+    /** Give back a claim whose request failed, so a retry can run. Never touches a stored answer. */
+    public static function release(Context $ctx, string $scope, ?string $key): void
+    {
+        $key = self::normalise($key);
+        if ($key === null) {
+            return;
+        }
+
+        Db::run(
+            'DELETE FROM ' . self::TABLE . '
+              WHERE cmp_id = :cmp AND scope = :scope AND idempotency_key = :key
+                AND response_status = ' . self::IN_PROGRESS,
+            ['cmp' => $ctx->cmpId, 'scope' => $scope, 'key' => $key],
+        );
+    }
+
     /**
      * Replay a previous answer, or null to go ahead.
      *
@@ -58,7 +128,9 @@ final class Idempotency
             ['cmp' => $ctx->cmpId, 'scope' => $scope, 'key' => $key],
         );
 
-        if ($row === null) {
+        // Status 0 is a claim (see claim()): the first request is still
+        // running and there is no answer to give yet.
+        if ($row === null || (int) $row['response_status'] === self::IN_PROGRESS) {
             return null;
         }
 
@@ -71,10 +143,10 @@ final class Idempotency
     /**
      * Record what was answered, so a repeat gets the same thing.
      *
-     * ON CONFLICT DO NOTHING rather than an upsert: if two copies of the same
-     * request genuinely raced past replay(), the FIRST answer is the real one
-     * and overwriting it with the second would hand the caller two different
-     * truths depending on which retry landed last.
+     * Not an upsert: if two copies of the same request genuinely raced past
+     * replay(), the FIRST answer is the real one and overwriting it with the
+     * second would hand the caller two different truths depending on which
+     * retry landed last. The one row it does fill in is its own claim.
      *
      * @param array<string, mixed> $body
      */
@@ -89,7 +161,9 @@ final class Idempotency
             Db::run(
                 'INSERT INTO ' . self::TABLE . ' (cmp_id, scope, idempotency_key, response_status, response_body)
                  VALUES (:cmp, :scope, :key, :status, :body)
-                 ON CONFLICT (cmp_id, scope, idempotency_key) DO NOTHING',
+                 ON CONFLICT (cmp_id, scope, idempotency_key) DO UPDATE
+                    SET response_status = EXCLUDED.response_status, response_body = EXCLUDED.response_body
+                  WHERE ' . self::TABLE . '.response_status = ' . self::IN_PROGRESS,
                 [
                     'cmp'    => $ctx->cmpId,
                     'scope'  => $scope,

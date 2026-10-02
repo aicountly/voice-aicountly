@@ -247,6 +247,8 @@ final class CampaignsDashboard extends Dashboard
                 'reason'    => $supported
                     ? null
                     : 'This connection does not support ' . Capability::describe($mode['needs']) . '.',
+                // What the mode cannot do even where the connection can.
+                'limitation' => $key === 'appointment_reminder' ? CampaignService::REMINDER_LIMITATION : null,
             ];
         }
 

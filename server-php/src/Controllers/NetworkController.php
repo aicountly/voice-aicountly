@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Aicountly\Api\Controllers;
 
 use Aicountly\Api\Audit;
+use Aicountly\Api\Clients\AppointmentsClient;
 use Aicountly\Api\Clients\CalendarClient;
 use Aicountly\Api\Clients\ContactsClient;
 use Aicountly\Api\Clients\CrmClient;
@@ -167,7 +168,7 @@ final class NetworkController extends Controller
      */
     public static function integrations(): never
     {
-        [, $ctx] = self::enter('voice.dashboard.view');
+        [$auth, $ctx] = self::enter('voice.dashboard.view');
         $probe = Http::param('probe') === '1';
 
         $stored = [];
@@ -177,7 +178,8 @@ final class NetworkController extends Controller
 
         $definitions = [
             'contacts'  => ['label' => 'Aicountly Contacts', 'client' => null, 'purpose' => 'Caller identification and the contact directory.'],
-            'calendar'  => ['label' => 'Aicountly Calendar', 'client' => CalendarClient::class, 'purpose' => 'Availability and bookings made from a call.'],
+            'calendar'  => ['label' => 'Aicountly Calendar', 'client' => CalendarClient::class, 'purpose' => 'Callback diary entries: a busy block in the assigned agent’s diary, moved and cancelled with the callback.'],
+            'appointments' => ['label' => 'Aicountly Appointments', 'client' => AppointmentsClient::class, 'purpose' => 'Bookings an AI agent makes during a call: free times and new bookings, through Appointments’ booking API. Moving or cancelling a booking is handed to a person.'],
             'crm'       => ['label' => 'Aicountly CRM',      'client' => CrmClient::class,      'purpose' => 'Leads and follow-up tasks from confirmed commitments.'],
             'pay'       => ['label' => 'Aicountly Pay',      'client' => PayClient::class,      'purpose' => 'Payment links sent during a call.'],
             'lobby'     => ['label' => 'Aicountly Lobby',    'client' => LobbyClient::class,    'purpose' => 'Reception desk coverage and visitor callbacks.'],
@@ -202,11 +204,22 @@ final class NetworkController extends Controller
             ];
 
             if ($probe && $enabled && $definition['client'] !== null) {
-                /** @var object $client */
-                $client = new $definition['client']();
-                $result = $client->health();
-                $entry['status'] = $result['ok'] ? 'connected' : ($result['status'] === 0 ? 'unavailable' : 'degraded');
-                $entry['reason'] = $result['ok'] ? null : ($result['error'] ?? 'Did not answer.');
+                if ($app === 'calendar' || $app === 'appointments') {
+                    // Not /health alone: a web server answering proves nothing
+                    // about Voice's key. An authenticated, harmless read does.
+                    $probed = $app === 'calendar'
+                        ? (new CalendarClient())->probe($auth->uuid, $ctx->cmpId)
+                        : (new AppointmentsClient())->probe($ctx->cmpId);
+                    $result = ['ok' => $probed['ok']];
+                    $entry['status'] = $probed['status'];
+                    $entry['reason'] = $probed['reason'];
+                } else {
+                    /** @var object $client */
+                    $client = new $definition['client']();
+                    $result = $client->health();
+                    $entry['status'] = $result['ok'] ? 'connected' : ($result['status'] === 0 ? 'unavailable' : 'degraded');
+                    $entry['reason'] = $result['ok'] ? null : ($result['error'] ?? 'Did not answer.');
+                }
                 $entry['checked_at'] = Clock::iso(Clock::now());
 
                 Db::run(

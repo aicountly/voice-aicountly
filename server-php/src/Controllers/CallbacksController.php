@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Aicountly\Api\Controllers;
 
 use Aicountly\Api\Db;
+use Aicountly\Api\Domain\CallbackDiary;
 use Aicountly\Api\Domain\CallbackService;
+use Aicountly\Api\Features;
 use Aicountly\Api\Http;
 use Aicountly\Api\Idempotency;
 
@@ -49,24 +51,75 @@ final class CallbacksController extends Controller
             $total,
             $params['limit'],
             $params['offset'],
-            // The reference only. A screen that needs the event's time reads it
-            // from Calendar; Voice does not hold a copy.
-            ['calendar_note' => 'calendar_event_ref points at Calendar. Times are read from Calendar, not stored here.'],
+            [
+                // What a diary entry is, in words a screen can show as they are.
+                'calendar_note' => self::CALENDAR_NOTE,
+                'calendar' => [
+                    // Configured, not proven: Integrations probes whether
+                    // Calendar accepts Voice's key.
+                    'enabled' => Features::enabled('CALENDAR') && CallbackDiary::schemaReady(),
+                    'reason'  => Features::explain('CALENDAR')
+                        ?? (CallbackDiary::schemaReady() ? null : CallbackDiary::SCHEMA_MISSING_REASON),
+                ],
+            ],
         );
+    }
+
+    /**
+     * Exactly what a diary entry is and is not. Shown under the queue.
+     */
+    private const CALENDAR_NOTE = 'Due times are kept here, in Voice. A callback can also hold its time in the '
+        . 'assigned agent’s Aicountly Calendar diary (or, with nobody assigned, the diary of the person who created it): '
+        . 'a ' . CallbackDiary::SLOT_MINUTES . '-minute busy entry titled with the callback number only. Voice moves or '
+        . 'cancels it when the callback is rescheduled, reassigned or cancelled here; it cannot be moved from Calendar. '
+        . 'Voice sends no reminder.';
+
+    /**
+     * Would this time clash in the diary the callback would go to?
+     *
+     * Advisory, before a time is promised to a caller: only the diary write
+     * itself decides. ?due_at=&assigned_agent_id=&callback_id=
+     */
+    public static function diaryCheck(): never
+    {
+        [$auth, $ctx] = self::enter('voice.callbacks.manage');
+
+        $agentId = Http::intParam('assigned_agent_id');
+        $callbackId = Http::intParam('callback_id');
+
+        Http::data(CallbackDiary::check(
+            $ctx,
+            $auth,
+            Http::param('due_at'),
+            $agentId !== null && $agentId > 0 ? $agentId : null,
+            $callbackId !== null && $callbackId > 0 ? $callbackId : null,
+        ));
     }
 
     public static function create(): never
     {
         [$auth, $ctx] = self::enter('voice.callbacks.manage');
 
+        // Claimed before anything runs: a retry that arrives while this request
+        // is still running must not create a second callback (and a second
+        // diary entry for it).
         $key = Idempotency::fromRequest();
-        $replay = Idempotency::replay($ctx, 'callback.create', $key);
-        if ($replay !== null) {
-            Http::json($replay['status'], $replay['body']);
+        $claim = Idempotency::claim($ctx, 'callback.create', $key);
+        if ($claim['status'] === 'replay' && $claim['replay'] !== null) {
+            Http::json($claim['replay']['status'], $claim['replay']['body']);
+        }
+        if ($claim['status'] === 'in_progress') {
+            Http::error(409, 'request_in_progress', 'This callback is still being created. Try again in a moment.', ['retryable' => true]);
         }
 
-        $result = CallbackService::create($ctx, $auth, Http::body());
+        try {
+            $result = CallbackService::create($ctx, $auth, Http::body());
+        } catch (\Throwable $e) {
+            Idempotency::release($ctx, 'callback.create', $key);
+            throw $e;
+        }
         if (!$result['ok']) {
+            Idempotency::release($ctx, 'callback.create', $key);
             self::fail($result['code'], $result['message']);
         }
 
@@ -84,6 +137,8 @@ final class CallbacksController extends Controller
             self::fail($result['code'], $result['message']);
         }
 
-        Http::data($result['callback'] ?? []);
+        // The callback changed whatever happened to its diary entry; `message`
+        // says what did, when it is not simply "done".
+        Http::json(200, ['data' => $result['callback'] ?? [], 'message' => $result['message']]);
     }
 }

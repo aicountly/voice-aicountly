@@ -18,11 +18,13 @@ namespace Aicountly\Api\Tests;
 use Aicountly\Api\Ai\AiClient;
 use Aicountly\Api\Ai\PulseAiClient;
 use Aicountly\Api\Auth;
+use Aicountly\Api\Clients\CalendarClient;
 use Aicountly\Api\Context;
 use Aicountly\Api\Crypto;
 use Aicountly\Api\Db;
 use Aicountly\Api\Domain\AiAgentService;
 use Aicountly\Api\Domain\BudgetService;
+use Aicountly\Api\Domain\CallbackDiary;
 use Aicountly\Api\Domain\CallbackService;
 use Aicountly\Api\Domain\CallingPolicy;
 use Aicountly\Api\Domain\CallService;
@@ -50,12 +52,19 @@ const CMP = 4001;
 const OTHER_CMP = 4002;
 const USER = 'user-aaa';
 const OTHER_USER = 'user-bbb';
+// my.aicountly subscriber ids are positive integers — the only actor Calendar accepts.
+const PERSON = '7101';
+const AGENT_A = '7001';
+const AGENT_B = '7002';
 
 truncateAll();
 stubReset();
 
 $owner = markOwner(Auth::forTesting(USER));
 $member = Auth::forTesting(OTHER_USER, 'user', 'voice', []);
+// The callback owner of the diary groups. Ownership is Manage's answer
+// (Context::isOwner), not acs_type, so the person is marked as one here.
+$person = markOwner(Auth::forTesting(PERSON, 'user', 'voice', ['acs_type' => 1]));
 
 echo "Voice integration tests\n" . str_repeat('=', 62) . "\n";
 
@@ -229,46 +238,96 @@ T::group('4. Idempotent call creation');
 T::group('5. Timeout after a possibly-successful external write');
 // ===========================================================================
 {
-    $ctx = scope(CMP, $owner);
-    stubMode('calendar', 'timeout');
+    stubReset();
+    $ctx = scope(CMP, $person);
 
-    $result = CallbackService::create($ctx, $owner, [
+    // Calendar makes the entry and the answer is lost on the way back.
+    stubMode('calendar', 'commit_then_drop');
+    $result = CallbackService::create($ctx, $person, [
         'e164'   => '+919876500030',
         'reason' => 'Ring back about the quote',
         'due_at' => Clock::iso(Clock::now()->modify('+1 hour')),
         'create_calendar_event' => true,
     ]);
+    $callbackId = (int) $result['callback']['callback_id'];
 
     T::ok($result['ok'], 'the callback itself is created — it is Voice’s own record');
     T::ok($result['callback']['calendar_event_ref'] === null,
         'no calendar reference is invented when the outcome is unknown');
 
-    $operation = Db::first(
-        'SELECT * FROM voice_external_operations WHERE cmp_id = :c ORDER BY operation_id DESC LIMIT 1',
-        ['c' => CMP],
-    );
+    $operation = lastDiaryOperation($callbackId);
     T::same(ExternalOperations::UNKNOWN, (string) $operation['status'],
         'the write is recorded as UNKNOWN, not failed and not succeeded');
-    T::ok(str_contains((string) $result['message'], 'not confirmed')
-       || str_contains((string) $result['message'], 'could not'),
-        'the message says the outcome is not confirmed');
+    T::ok(str_contains((string) $result['message'], 'not confirmed'), 'the message says the outcome is not confirmed');
+    T::same(1, count(calendarStub()['events']), 'Calendar did make the entry; only its answer was lost');
 
-    // The reconcile path: ask the owner what it holds, do not resend.
-    $operationId = (int) $operation['operation_id'];
-    ExternalOperations::reconcile($operationId, true, 'stub-event-reconciled');
-    $after = ExternalOperations::find($ctx, $operationId);
-    T::same(ExternalOperations::SUCCEEDED, (string) $after['status'],
-        'reconciling with the owner settles it as succeeded');
-    T::same('stub-event-reconciled', (string) $after['external_ref'],
-        'and stores the owner’s reference');
+    // A change while the outcome is unknown waits: two writes in flight for
+    // one entry is how it ends up wrong.
+    $moved = CallbackService::update($ctx, $person, $callbackId, ['due_at' => Clock::iso(Clock::now()->modify('+2 hours'))]);
+    T::ok(str_contains((string) $moved['message'], 'still being confirmed'), 'an edit while unknown is held, and says so');
+    T::same(1, count(calendarRequests()), 'and nothing else is sent to Calendar meanwhile');
 
-    // The other branch: the owner never made one.
-    $second = ExternalOperations::begin($ctx, 'calendar', 'create_event', [], [], USER);
-    ExternalOperations::reconcile($second['operation_id'], false, null);
-    $secondAfter = ExternalOperations::find($ctx, $second['operation_id']);
-    T::same(ExternalOperations::FAILED, (string) $secondAfter['status'],
-        'an owner with no record settles it as failed, cleanly');
+    // The reconcile path: the worker ASKS, by source_ref, as the diary owner.
+    runRecovery();
+    $after = ExternalOperations::find($ctx, (int) $operation['operation_id']);
+    $eventId = (string) array_key_first(calendarStub()['events']);
+    T::same(ExternalOperations::SUCCEEDED, (string) $after['status'], 'the recovery worker settles it as succeeded');
+    T::same($eventId, (string) $after['external_ref'], 'by adopting the event Calendar holds');
+    $lookups = calendarRequests('GET', 'calendar/events');
+    T::same(['source_app' => 'voice', 'source_ref' => (string) $callbackId], $lookups[0]['query'] ?? null,
+        'asked through the lookup: source_app=voice&source_ref=<callback id>');
+    T::same([PERSON, 'cmp:' . CMP], [$lookups[0]['headers']['x-actor-uuid'] ?? null, $lookups[0]['headers']['x-tenant-ref'] ?? null],
+        'as the diary owner the entry was written for, for this company');
+    T::same(1, count(calendarRequests('POST')), 'nothing was POSTed again');
+    T::same(1, count(calendarStub()['events']), 'exactly one diary entry exists');
 
+    // ...and then the edit that was waiting is made, with If-Match.
+    $patches = calendarRequests('PATCH');
+    T::same(1, count($patches), 'the held edit is applied once the outcome is known');
+    T::same('"1"', $patches[0]['headers']['if-match'] ?? null, 'as a PATCH carrying the version Calendar confirmed');
+    $row = CallbackService::row($ctx, $callbackId);
+    T::same([2, 'linked'], [(int) $row['calendar_version'], (string) $row['calendar_state']], 'and the entry is in step again');
+
+    // The other branch: the request never reached Calendar at all.
+    stubReset();
+    stubMode('calendar', 'timeout');
+    $lost = CallbackService::create($ctx, $person, [
+        'e164' => '+919876500031', 'due_at' => Clock::iso(Clock::now()->modify('+3 hours')), 'create_calendar_event' => true,
+    ]);
+    $lostId = (int) $lost['callback']['callback_id'];
+    T::same(ExternalOperations::UNKNOWN, (string) lastDiaryOperation($lostId)['status'], 'a request with no answer is UNKNOWN too');
+    T::same(0, count(calendarStub()['events']), 'and this time Calendar has nothing');
+
+    stubMode('calendar', 'up');
+    runRecovery();
+    $posts = calendarRequests('POST');
+    T::same(ExternalOperations::SUCCEEDED, (string) lastDiaryOperation($lostId)['status'],
+        'the worker finds nothing, sends the same attempt again, and it lands');
+    T::same(2, count($posts), 'one original POST and one resend');
+    T::same($posts[0]['headers']['idempotency-key'], $posts[1]['headers']['idempotency-key'],
+        'the resend carries the SAME Idempotency-Key — never a new one');
+    T::same($posts[0]['body'], $posts[1]['body'], 'and the same body');
+    T::same(1, count(calendarStub()['events']), 'one entry, not two');
+
+    // Calendar that cannot be asked keeps the outcome unknown — for good.
+    stubReset();
+    stubMode('calendar', 'down');
+    $dark = CallbackService::create($ctx, $person, [
+        'e164' => '+919876500032', 'due_at' => Clock::iso(Clock::now()->modify('+4 hours')), 'create_calendar_event' => true,
+    ]);
+    $darkId = (int) $dark['callback']['callback_id'];
+    for ($i = 0; $i < 7; $i++) {
+        runRecovery();
+    }
+    $stuck = lastDiaryOperation($darkId);
+    T::same(ExternalOperations::UNKNOWN, (string) $stuck['status'],
+        'seven failed lookups later it is still UNKNOWN — never failed, never abandoned');
+    T::ok((int) $stuck['attempts'] >= 8 && $stuck['next_check_at'] !== null, 'and it is asked again later, with backoff');
+    T::same(1, count(calendarRequests('POST')), 'and it is never re-sent while Calendar cannot be asked');
+    T::same('unknown', CallbackService::find($ctx, $darkId)['calendar']['state'], 'the callback shows the entry as pending verification');
+
+    // Leave nothing open for the groups that follow.
+    Db::run("UPDATE voice_external_operations SET status = 'failed' WHERE status IN ('pending', 'unknown', 'deferred')");
     stubReset();
 }
 
@@ -276,13 +335,13 @@ T::group('5. Timeout after a possibly-successful external write');
 T::group('6. Calendar failure creates no local event');
 // ===========================================================================
 {
-    $ctx = scope(CMP, $owner);
+    $ctx = scope(CMP, $person);
     stubMode('calendar', 'down');
 
     $before = (int) Db::scalar('SELECT COUNT(*) FROM voice_callbacks WHERE cmp_id = :c', ['c' => CMP]);
 
-    $result = CallbackService::create($ctx, $owner, [
-        'e164'   => '+919876500031',
+    $result = CallbackService::create($ctx, $person, [
+        'e164'   => '+919876500033',
         'due_at' => Clock::iso(Clock::now()->modify('+2 hours')),
         'create_calendar_event' => true,
     ]);
@@ -307,6 +366,7 @@ T::group('6. Calendar failure creates no local event');
     T::same($before + 1, (int) Db::scalar('SELECT COUNT(*) FROM voice_callbacks WHERE cmp_id = :c', ['c' => CMP]),
         'exactly one callback was created');
 
+    Db::run("UPDATE voice_external_operations SET status = 'failed' WHERE status IN ('pending', 'unknown', 'deferred')");
     stubReset();
 }
 
@@ -362,7 +422,7 @@ T::group('8. Provider capability restrictions');
     // A company with no connection can do nothing, and says so clearly.
     $emptyCtx = Context::forCompany(4999);
     Context::trustForTesting(4999, $owner, true);
-    // A wide-open window, so this checks the provider refusal and not the
+    // Open all hours, so what is refused is the missing connection and not the
     // time of day the suite happens to run at.
     seedSettings(4999);
     $nullAdapter = ProviderRegistry::forCompany($emptyCtx);
@@ -1087,6 +1147,7 @@ T::group('24. No cross-app database access exists');
             'books_'                 => 'another product’s table prefix',
             'contacts_'              => 'another product’s table prefix',
             'calendar_events'        => 'another product’s table',
+            'appointment_bookings'   => 'another product’s table',
         ] as $needle => $what) {
             if (str_contains($source, $needle)) {
                 $offenders[] = basename($path) . ' contains ' . $what;
@@ -1389,7 +1450,7 @@ T::group('25. AI runs through AI Pulse');
 }
 
 // ===========================================================================
-T::group('26. Sibling hosts come from configuration, never from the request (G18#25)');
+T::group('35. Sibling hosts come from configuration, never from the request (G18#25)');
 // ===========================================================================
 {
     // LOBBY_API_BASE is not set by the test .env, so this client shows what
@@ -1435,7 +1496,7 @@ T::group('26. Sibling hosts come from configuration, never from the request (G18
 }
 
 // ===========================================================================
-T::group('27. Numbers become E.164 with a region, never by prefixing + (G18#6)');
+T::group('36. Numbers become E.164 with a region, never by prefixing + (G18#6)');
 // ===========================================================================
 {
     $e = static fn (string $raw, ?string $region = 'IN'): ?string => \Aicountly\Api\Support\PhoneNumber::toE164($raw, $region);
@@ -1491,7 +1552,7 @@ T::group('27. Numbers become E.164 with a region, never by prefixing + (G18#6)')
 }
 
 // ===========================================================================
-T::group('28. Company owner comes from Manage companyinfo, not acs_type (I-18, G18#5)');
+T::group('37. Company owner comes from Manage companyinfo, not acs_type (I-18, G18#5)');
 // ===========================================================================
 {
     $a = static fn (int $status, ?array $json, int $cmp) => \Aicountly\Api\ManageCompanyAnswer::interpret($status, $json, $cmp);
@@ -1567,7 +1628,7 @@ T::group('28. Company owner comes from Manage companyinfo, not acs_type (I-18, G
 }
 
 // ===========================================================================
-T::group('29. Contacts: canonical shape, company endpoints, matchCount (G18#2, G18#3, G18#7)');
+T::group('38. Contacts: canonical shape, company endpoints, matchCount (G18#2, G18#3, G18#7)');
 // ===========================================================================
 {
     stubReset();
@@ -1627,7 +1688,7 @@ T::group('29. Contacts: canonical shape, company endpoints, matchCount (G18#2, G
 }
 
 // ===========================================================================
-T::group('30. Campaign worker reads Contacts through a delegation grant (I-19, G18#1)');
+T::group('39. Campaign worker reads Contacts through a delegation grant (I-19, G18#1)');
 // ===========================================================================
 {
     stubReset();
@@ -1736,7 +1797,7 @@ T::group('30. Campaign worker reads Contacts through a delegation grant (I-19, G
 }
 
 // ===========================================================================
-T::group('31. Inbound calls are created and callers identified by company lookup (G18#4)');
+T::group('40. Inbound calls are created and callers identified by company lookup (G18#4)');
 // ===========================================================================
 {
     stubReset();
@@ -1812,7 +1873,7 @@ T::group('31. Inbound calls are created and callers identified by company lookup
 }
 
 // ===========================================================================
-T::group('32. Service keys: route allow-list, company, actor and environment binding (G18#31)');
+T::group('41. Service keys: route allow-list, company, actor and environment binding (G18#31)');
 // ===========================================================================
 {
     stubReset();
@@ -1868,6 +1929,21 @@ T::group('32. Service keys: route allow-list, company, actor and environment bin
     $r = request('GET', '/v1/recordings', ['cmp_id' => (string) OTHER_CMP], [], $crm);
     T::same(403, $r['status'], 'and a CRM key never reaches recordings (not on its list)');
 
+    // The Voice Gateway's key reaches the AI action route and nothing else:
+    // main's route for it must survive the allow-list.
+    clearHeaders();
+    putenv('SERVICE_KEYS=lobby:test-lobby-key-0123456789,gateway:test-gateway-key-0123456789');
+    putenv('SERVICE_KEY_COMPANIES=gateway:' . CMP);
+    $gw = ['X-Service-Key' => 'test-gateway-key-0123456789', 'X-AIC-Environment' => 'local'];
+    $r = request('POST', '/v1/calls/999999/ai-actions', ['cmp_id' => (string) CMP], [], $gw);
+    T::ok(($r['body']['error']['code'] ?? null) !== 'service_route_not_allowed', 'the Gateway key is allowed the AI action route');
+    clearHeaders();
+    $r = request('GET', '/v1/calls', ['cmp_id' => (string) CMP], [], $gw);
+    T::same('service_route_not_allowed', $r['body']['error']['code'] ?? null, 'and nothing else: the Gateway key may not read calls');
+    clearHeaders();
+    $r = request('POST', '/v1/calls/999999/ai-actions', ['cmp_id' => (string) CMP], [], $lobby);
+    T::same(403, $r['status'], 'while another product\'s key may not run an AI agent\'s actions');
+
     unset($_SERVER['HTTP_AUTHORIZATION']);
     clearHeaders();
     putenv('SERVICE_KEYS');
@@ -1879,7 +1955,7 @@ T::group('32. Service keys: route allow-list, company, actor and environment bin
 }
 
 // ===========================================================================
-T::group('33. The live stream takes a single-use ticket, never the session key (G18#14, G18#24)');
+T::group('42. The live stream takes a single-use ticket, never the session key (G18#14, G18#24)');
 // ===========================================================================
 {
     Context::resetForTesting();
@@ -1931,6 +2007,900 @@ T::group('33. The live stream takes a single-use ticket, never the session key (
     Auth::adopt($owner);
     $source = (string) file_get_contents(dirname(__DIR__, 2) . '/web/src/services/api.ts');
     T::ok(!str_contains($source, "'access_token'"), 'and the SPA no longer puts the session key in the stream URL');
+}
+
+// ===========================================================================
+T::group('26. Callback diary entries follow Calendar’s v1 contract');
+// ===========================================================================
+{
+    stubReset();
+    Db::run("UPDATE voice_external_operations SET status = 'failed' WHERE status IN ('pending', 'unknown', 'deferred')");
+    $ctx = scope(CMP, $person);
+    Auth::adopt($person);
+    $agentA = seedAgent(CMP, AGENT_A, '2001');
+    $agentB = seedAgent(CMP, AGENT_B, '2002');
+    $day = Clock::now()->modify('+2 days')->setTime(9, 0);
+    $at = static fn (int $minutes): \DateTimeImmutable => $day->modify('+' . $minutes . ' minutes');
+    $request = static fn (string $method, string $path, array $body = [], array $query = []): array
+        => request($method, $path, ['cmp_id' => (string) CMP] + $query, $body);
+
+    // --- The create, on the wire --------------------------------------------
+    $created = $request('POST', '/v1/callbacks', [
+        'e164' => '+919876500050', 'reason' => 'Wants the GST refund explained',
+        'due_at' => Clock::iso($at(0)), 'assigned_agent_id' => $agentA, 'create_calendar_event' => true,
+    ]);
+    $cb = $created['body']['data'] ?? [];
+    $cbId = (int) ($cb['callback_id'] ?? 0);
+    T::same(201, $created['status'], 'a callback with a diary entry is created');
+    T::same(null, array_key_exists('message', $created['body']) ? $created['body']['message'] : 'missing', 'a confirmed entry needs no warning');
+    T::same('linked', $cb['calendar']['state'] ?? null, 'and the callback says it is in the diary');
+
+    $posts = calendarRequests('POST');
+    $post = $posts[0] ?? ['headers' => [], 'body' => [], 'path' => ''];
+    $operation = lastDiaryOperation($cbId) ?? [];
+    T::same(['calendar/events', 1], [$post['path'], count($posts)], 'one POST calendar/events');
+    T::same(AGENT_A, $post['headers']['x-actor-uuid'] ?? null, 'X-Actor-Uuid is the ASSIGNED agent, not whoever created it');
+    T::same('test-calendar-service-key-0123456789', $post['headers']['x-service-key'] ?? null, 'sent with Voice’s own service key (Mode S)');
+    T::same('cmp:' . CMP, $post['headers']['x-tenant-ref'] ?? null, 'naming the company in X-Tenant-Ref');
+    T::same('1', $post['headers']['x-calendar-contract'] ?? null, 'in strict v1 mode (X-Calendar-Contract: 1)');
+    T::same('', $post['headers']['authorization'] ?? null, 'and never with a borrowed session');
+    T::same((string) ($operation['idempotency_key'] ?? ''), $post['headers']['idempotency-key'] ?? null,
+        'its Idempotency-Key is the attempt recorded before the call');
+    T::same((string) ($operation['idempotency_key'] ?? 'x'), (string) ($operation['correlation_id'] ?? 'y'), 'one key per attempt, not per callback');
+    $keys = array_keys($post['body']);
+    sort($keys);
+    T::same(['busy_status', 'category', 'description', 'end_at', 'priority', 'source_app', 'source_ref', 'start_at', 'status', 'timezone', 'title', 'visibility'],
+        $keys, 'the body is v1 fields only — no source, correlation_id, cmp_id, bo_id or reminder');
+    T::same([(string) $cbId, 'voice'], [$post['body']['source_ref'] ?? null, $post['body']['source_app'] ?? null], 'source_ref is the callback id');
+    T::same('Callback · #' . $cbId, $post['body']['title'] ?? null, 'the title is neutral');
+    $wire = json_encode($post['body'], JSON_UNESCAPED_UNICODE);
+    T::ok(!str_contains($wire, '9876') && !str_contains($wire, 'GST') && !str_contains($wire, 'refund'),
+        'no digit of the number and no word of the reason reaches Calendar');
+    T::same(['busy_only', 'busy', 'confirmed'], [$post['body']['visibility'] ?? null, $post['body']['busy_status'] ?? null, $post['body']['status'] ?? null],
+        'busy, busy-only, confirmed');
+    T::same([Clock::iso($at(0)), Clock::iso($at(15))], [$post['body']['start_at'] ?? null, $post['body']['end_at'] ?? null],
+        'start_at/end_at are explicit UTC instants, fifteen minutes apart');
+    T::ok(!isset($post['body']['conflict_policy']), 'no conflict_policy when no exact time was promised');
+    $eventA = calendarStub()['events'][$cb['calendar_event_ref'] ?? ''] ?? null;
+    T::same(AGENT_A, $eventA['_subscriber'] ?? null, 'the entry is in the assigned agent’s diary');
+    $row = CallbackService::row($ctx, $cbId) ?? [];
+    T::same([AGENT_A, 1, (string) $cbId], [$row['calendar_owner_uuid'] ?? null, (int) ($row['calendar_version'] ?? 0), $row['calendar_source_ref'] ?? null],
+        'Voice keeps the owner, the version and the source_ref — a reference, not the event');
+    T::same([ExternalOperations::SUCCEEDED, $cb['calendar_event_ref']], [$operation['status'] ?? null, $operation['external_ref'] ?? null],
+        'the operation succeeded on Calendar’s id');
+
+    // --- Unassigned: the creator's diary, when the creator is a person -------
+    $mine = CallbackService::create($ctx, $person, ['e164' => '+919876500051', 'due_at' => Clock::iso($at(60)), 'create_calendar_event' => true]);
+    T::same(PERSON, calendarRequests('POST')[1]['headers']['x-actor-uuid'] ?? null, 'with nobody assigned it goes to the creator’s diary');
+    T::same([null, 'linked'], [$mine['message'], $mine['callback']['calendar']['state']], 'and is confirmed');
+
+    // --- A service caller that named nobody gets no entry --------------------
+    $before = count(calendarRequests());
+    foreach ([Auth::forTesting('service:lobby', 'service', 'lobby'), Auth::forTesting('desk-uuid-7', 'service', 'lobby')] as $service) {
+        $nobody = CallbackService::create($ctx, $service, ['e164' => '+919876500052', 'due_at' => Clock::iso($at(90)), 'create_calendar_event' => true]);
+        T::ok($nobody['ok'] && str_contains((string) $nobody['message'], 'nobody to put it in'),
+            'a callback from "' . $service->uuid . '" is saved and says there is no diary to put it in');
+        T::same('failed', $nobody['callback']['calendar']['state'], 'and its diary state says so');
+    }
+    T::same($before, count(calendarRequests()), 'and nothing at all is sent to Calendar for them');
+
+    // --- A promised exact time: Calendar refuses a busy diary -----------------
+    calendarSeedEvent(AGENT_B, Clock::iso($at(120)), Clock::iso($at(180)));
+    $busy = CallbackService::create($ctx, $person, [
+        'e164' => '+919876500053', 'due_at' => Clock::iso($at(150)), 'exact_time' => true,
+        'assigned_agent_id' => $agentB, 'create_calendar_event' => true,
+    ]);
+    $busyId = (int) $busy['callback']['callback_id'];
+    $posts = calendarRequests('POST');
+    T::same('reject', end($posts)['body']['conflict_policy'] ?? null, 'a promised time is written with conflict_policy "reject"');
+    T::ok($busy['ok'] && $busy['callback']['calendar']['state'] === 'refused', 'the callback is saved; the entry is refused');
+    T::ok(str_contains((string) $busy['message'], 'busy then'), 'and the person is told the agent is busy then');
+    T::same(['failed', 'slot_taken'], [lastDiaryOperation($busyId)['status'] ?? null, lastDiaryOperation($busyId)['error_code'] ?? null],
+        'the attempt is final — slot_taken is not retried');
+    $postsBefore = count(calendarRequests('POST'));
+    runRecovery();
+    CallbackService::update($ctx, $person, $busyId, ['reason' => 'Still wants the call']);
+    T::same($postsBefore, count(calendarRequests('POST')), 'neither the worker nor an unrelated edit tries again');
+    $free = CallbackService::update($ctx, $person, $busyId, ['due_at' => Clock::iso($at(180))]);
+    T::same(['linked', null], [$free['callback']['calendar']['state'], $free['message']],
+        'moving it to a free time (back-to-back is not a clash) makes the entry');
+
+    // --- Reschedule: PATCH with If-Match ----------------------------------------
+    $patchesBefore = count(calendarRequests('PATCH'));
+    $moved = CallbackService::update($ctx, $person, $cbId, ['due_at' => Clock::iso($at(30))]);
+    $patch = calendarRequests('PATCH')[$patchesBefore] ?? ['headers' => [], 'body' => [], 'path' => ''];
+    T::same('calendar/events/' . $cb['calendar_event_ref'], $patch['path'], 'a reschedule PATCHes the same event');
+    T::same(['"1"', AGENT_A], [$patch['headers']['if-match'] ?? null, $patch['headers']['x-actor-uuid'] ?? null],
+        'with If-Match on the version Voice holds, as the owner');
+    T::same(['end_at' => Clock::iso($at(45)), 'start_at' => Clock::iso($at(30))], $patch['body'], 'sending only the new times');
+    T::same([null, 2], [$moved['message'], (int) CallbackService::row($ctx, $cbId)['calendar_version']], 'and keeps the new version');
+    T::same(Clock::iso($at(30)), calendarStub()['events'][$cb['calendar_event_ref']]['start_at'], 'Calendar now holds the new time');
+
+    $quiet = count(calendarRequests());
+    CallbackService::update($ctx, $person, $cbId, ['reason' => 'Changed the reason only', 'priority' => 'high']);
+    T::same($quiet, count(calendarRequests()), 'an edit to the reason or priority sends nothing — neither is in the entry');
+
+    // --- Someone changed it since: version conflict, re-read, retry -----------
+    calendarStubEdit($cb['calendar_event_ref'], ['version' => 3, 'title' => 'Renamed by the agent']);
+    $patchesBefore = count(calendarRequests('PATCH'));
+    $retried = CallbackService::update($ctx, $person, $cbId, ['due_at' => Clock::iso($at(40))]);
+    $patches = array_slice(calendarRequests('PATCH'), $patchesBefore);
+    T::same(['"2"', '"3"'], [$patches[0]['headers']['if-match'] ?? null, $patches[1]['headers']['if-match'] ?? null],
+        'a stale version is refused (409 version_conflict) and retried on Calendar’s current one');
+    T::ok(($patches[0]['headers']['idempotency-key'] ?? 'a') !== ($patches[1]['headers']['idempotency-key'] ?? 'a'),
+        'the retry is a new attempt, so it has a new key');
+    T::same(['linked', 4], [$retried['callback']['calendar']['state'], (int) CallbackService::row($ctx, $cbId)['calendar_version']],
+        'and the entry ends in step');
+
+    // --- Reassign: cancel in the old diary, create in the new one ---------------
+    $requestsBefore = count(calendarRequests());
+    $reassigned = CallbackService::update($ctx, $person, $cbId, ['assigned_agent_id' => $agentB]);
+    $sent = array_slice(calendarRequests(), $requestsBefore);
+    T::same(['PATCH', 'POST'], array_column($sent, 'method'), 'a reassign is a cancel then a create');
+    T::same([AGENT_A, ['status' => 'cancelled']], [$sent[0]['headers']['x-actor-uuid'] ?? null, $sent[0]['body'] ?? null],
+        'the old entry is cancelled in the old agent’s diary');
+    T::same('', $sent[0]['headers']['if-match'] ?? null, 'a cancel needs no If-Match — releasing time is unconditional');
+    T::same([AGENT_B, $cbId . ':2'], [$sent[1]['headers']['x-actor-uuid'] ?? null, $sent[1]['body']['source_ref'] ?? null],
+        'and a new one is created in the new agent’s diary under a new source_ref');
+    $rowB = CallbackService::row($ctx, $cbId);
+    T::same(['linked', AGENT_B], [$reassigned['callback']['calendar']['state'], $rowB['calendar_owner_uuid']], 'the callback now points at the new entry');
+    T::same('cancelled', calendarStub()['events'][$cb['calendar_event_ref']]['status'], 'the old entry is cancelled, not deleted');
+
+    // --- Cancel; then re-open: a new entry, never a revived one -----------------
+    $entryB = (string) $rowB['calendar_event_ref'];
+    $cancelled = CallbackService::update($ctx, $person, $cbId, ['status' => 'cancelled']);
+    T::same(['cancelled', 'cancelled'], [$cancelled['callback']['calendar']['state'], calendarStub()['events'][$entryB]['status']],
+        'cancelling the callback cancels its entry');
+    $quiet = count(calendarRequests());
+    CallbackService::update($ctx, $person, $cbId, ['status' => 'cancelled']);
+    T::same($quiet, count(calendarRequests()), 'cancelling it again sends nothing');
+    $reopened = CallbackService::update($ctx, $person, $cbId, ['status' => 'scheduled']);
+    $last = calendarRequests();
+    $last = end($last);
+    T::same(['POST', $cbId . ':3'], [$last['method'], $last['body']['source_ref'] ?? null],
+        're-opening makes a NEW entry under a new source_ref');
+    T::same('cancelled', calendarStub()['events'][$entryB]['status'], 'and the cancelled one stays cancelled');
+    T::same([], array_values(array_filter(calendarRequests('PATCH'), static fn (array $r): bool => ($r['body']['status'] ?? 'cancelled') !== 'cancelled')),
+        'no PATCH ever tried to un-cancel anything');
+
+    // --- Done early: the future time is released ---------------------------------
+    $doneRef = (string) CallbackService::row($ctx, $cbId)['calendar_event_ref'];
+    CallbackService::update($ctx, $person, $cbId, ['status' => 'completed']);
+    T::same('cancelled', calendarStub()['events'][$doneRef]['status'], 'a callback completed before its time frees the diary');
+
+    // --- Calendar already holds the source_ref --------------------------------------
+    $plain = CallbackService::create($ctx, $person, ['e164' => '+919876500054', 'due_at' => Clock::iso($at(300)), 'assigned_agent_id' => $agentA]);
+    $plainId = (int) $plain['callback']['callback_id'];
+    $existing = calendarSeedEvent(AGENT_A, Clock::iso($at(300)), Clock::iso($at(315)),
+        ['source_app' => 'voice', 'source_ref' => (string) $plainId, 'created_by_app' => 'voice']);
+    $adopted = CallbackService::update($ctx, $person, $plainId, ['create_calendar_event' => true]);
+    T::same([$existing, 'linked'], [$adopted['callback']['calendar_event_ref'], $adopted['callback']['calendar']['state']],
+        '409 source_ref_exists: the entry Calendar holds is adopted, never duplicated');
+
+    $gone = CallbackService::create($ctx, $person, ['e164' => '+919876500055', 'due_at' => Clock::iso($at(330)), 'assigned_agent_id' => $agentA]);
+    $goneId = (int) $gone['callback']['callback_id'];
+    $dead = calendarSeedEvent(AGENT_A, Clock::iso($at(330)), Clock::iso($at(345)),
+        ['source_app' => 'voice', 'source_ref' => (string) $goneId, 'status' => 'cancelled']);
+    $postsBefore = count(calendarRequests('POST'));
+    $notRevived = CallbackService::update($ctx, $person, $goneId, ['create_calendar_event' => true]);
+    T::same([$dead, 'cancelled'], [$notRevived['callback']['calendar_event_ref'], $notRevived['callback']['calendar']['state']],
+        'an adopted entry that is cancelled is recorded as cancelled');
+    T::same($postsBefore + 1, count(calendarRequests('POST')), 'and is not recreated');
+    T::ok(str_contains((string) $notRevived['message'], 'does not bring a cancelled entry back'), 'and the person is told why');
+
+    // --- Calendar refuses Voice before acting: deferred, then the same attempt ----
+    stubMode('calendar', 'reject_key');
+    $deferred = CallbackService::create($ctx, $person, ['e164' => '+919876500056', 'due_at' => Clock::iso($at(360)), 'create_calendar_event' => true]);
+    $deferredId = (int) $deferred['callback']['callback_id'];
+    T::same([ExternalOperations::DEFERRED, 'unauthenticated'], [lastDiaryOperation($deferredId)['status'], lastDiaryOperation($deferredId)['error_code']],
+        'a refused key is DEFERRED — not failed, and not unknown');
+    T::ok(str_contains((string) $deferred['message'], 'not accepted'), 'and the person is told nothing was written yet');
+    stubMode('calendar', 'up');
+    runRecovery();
+    $posts = array_values(array_filter(calendarRequests('POST'), static fn (array $r): bool => ($r['body']['source_ref'] ?? '') === (string) $deferredId));
+    T::same(ExternalOperations::SUCCEEDED, lastDiaryOperation($deferredId)['status'], 'once the key is accepted the worker sends it again and it lands');
+    T::same($posts[0]['headers']['idempotency-key'] ?? 'a', $posts[1]['headers']['idempotency-key'] ?? 'b', 'as the same attempt, under the same key');
+
+    // A deferred attempt the callback no longer needs is dropped unsent.
+    stubMode('calendar', 'reject_key');
+    $stale = CallbackService::create($ctx, $person, ['e164' => '+919876500057', 'due_at' => Clock::iso($at(390)), 'create_calendar_event' => true]);
+    $staleId = (int) $stale['callback']['callback_id'];
+    $held = CallbackService::update($ctx, $person, $staleId, ['status' => 'cancelled']);
+    T::ok(str_contains((string) $held['message'], 'still being confirmed'), 'a change while an attempt is deferred waits');
+    stubMode('calendar', 'up');
+    $postsBefore = count(calendarRequests('POST'));
+    runRecovery();
+    T::same(['failed', 'superseded'], [lastDiaryOperation($staleId)['status'], lastDiaryOperation($staleId)['error_code']],
+        'the deferred create is dropped as superseded');
+    T::same($postsBefore, count(calendarRequests('POST')), 'without sending it');
+
+    // Not a member of the company per Manage: a configuration problem, retried.
+    calendarStubFlag('denied', [AGENT_A]);
+    $denied = CallbackService::create($ctx, $person, ['e164' => '+919876500058', 'due_at' => Clock::iso($at(420)),
+        'assigned_agent_id' => $agentA, 'create_calendar_event' => true]);
+    $deniedId = (int) $denied['callback']['callback_id'];
+    T::same(['deferred', 'actor_not_authorized'], [$denied['callback']['calendar']['state'], lastDiaryOperation($deniedId)['error_code']],
+        '403 actor_not_authorized is deferred for an administrator, not failed');
+    calendarStubFlag('denied', []);
+    runRecovery();
+    T::same('linked', CallbackService::find($ctx, $deniedId)['calendar']['state'], 'and lands once Calendar accepts the agent');
+
+    // --- Calendar rejects the request itself: a fault, final ----------------------
+    stubMode('calendar', 'reject_fields');
+    $rejected = CallbackService::create($ctx, $person, ['e164' => '+919876500059', 'due_at' => Clock::iso($at(450)), 'create_calendar_event' => true]);
+    $rejectedId = (int) $rejected['callback']['callback_id'];
+    T::same(['failed', 'unsupported_field'], [lastDiaryOperation($rejectedId)['status'], lastDiaryOperation($rejectedId)['error_code']],
+        'a 422 is FAILED: Calendar understood and refused');
+    T::ok(str_contains((string) $rejected['message'], 'fault in Voice'), 'and is reported as Voice’s fault, logged');
+    stubMode('calendar', 'up');
+    $postsBefore = count(calendarRequests('POST'));
+    runRecovery();
+    T::same($postsBefore, count(calendarRequests('POST')), 'it is never retried');
+
+    // --- External calendar not synced: unknown is not free ------------------------
+    calendarStubFlag('stale', [AGENT_A]);
+    $unverified = CallbackService::create($ctx, $person, ['e164' => '+919876500060', 'due_at' => Clock::iso($at(480)),
+        'assigned_agent_id' => $agentA, 'exact_time' => true, 'create_calendar_event' => true]);
+    T::ok($unverified['callback']['calendar']['state'] === 'refused' && str_contains((string) $unverified['message'], 'could not confirm'),
+        '409 availability_unverified refuses the entry and says availability is unknown');
+    calendarStubFlag('stale', []);
+
+    // --- Calendar before v1: a 2xx without a version is never success -------------
+    stubMode('calendar', 'pre_v1');
+    $old = CallbackService::create($ctx, $person, ['e164' => '+919876500061', 'due_at' => Clock::iso($at(510)), 'create_calendar_event' => true]);
+    $oldOp = lastDiaryOperation((int) $old['callback']['callback_id']);
+    T::same([ExternalOperations::UNKNOWN, 'contract_unsupported'], [$oldOp['status'], $oldOp['error_code']],
+        'a pre-v1 Calendar’s 201 is UNKNOWN (contract_unsupported), never succeeded');
+    T::same(null, $old['callback']['calendar_event_ref'], 'and no reference is stored from it');
+    runRecovery();
+    T::same(ExternalOperations::UNKNOWN, lastDiaryOperation((int) $old['callback']['callback_id'])['status'],
+        'its lookup fails (pre-v1 has none), so it stays unknown');
+    stubMode('calendar', 'up');
+    Db::run("UPDATE voice_external_operations SET status = 'failed' WHERE status IN ('pending', 'unknown', 'deferred')");
+
+    // --- Same key still executing ---------------------------------------------------
+    stubMode('calendar', 'in_progress');
+    $busyKey = CallbackService::create($ctx, $person, ['e164' => '+919876500062', 'due_at' => Clock::iso($at(540)), 'create_calendar_event' => true]);
+    $busyKeyId = (int) $busyKey['callback']['callback_id'];
+    T::same([ExternalOperations::PENDING, 'pending'], [lastDiaryOperation($busyKeyId)['status'], $busyKey['callback']['calendar']['state']],
+        '409 request_in_progress leaves the attempt pending');
+    runRecovery();
+    T::same(ExternalOperations::SUCCEEDED, lastDiaryOperation($busyKeyId)['status'], 'and the worker finishes it under the same key');
+
+    // --- A row written before this contract: never guessed at -----------------------
+    $legacyCallback = CallbackService::create($ctx, $person, ['e164' => '+919876500063', 'due_at' => Clock::iso($at(570))]);
+    $legacy = ExternalOperations::begin($ctx, 'calendar', 'create_event', ['kind' => 'callback'],
+        ['callback_id' => (int) $legacyCallback['callback']['callback_id']], PERSON);
+    Db::run("UPDATE voice_external_operations SET status = 'unknown' WHERE operation_id = :id", ['id' => $legacy['operation_id']]);
+    $before = count(calendarRequests());
+    runRecovery();
+    T::same(['abandoned', 'legacy_unaddressable'], [
+        (string) Db::scalar('SELECT status FROM voice_external_operations WHERE operation_id = :id', ['id' => $legacy['operation_id']]),
+        (string) Db::scalar('SELECT error_code FROM voice_external_operations WHERE operation_id = :id', ['id' => $legacy['operation_id']]),
+    ], 'an operation recorded without an owner or source_ref is handed to a person, not guessed');
+    T::same($before, count(calendarRequests()), 'and Calendar is not asked about it');
+
+    // --- Switched off ---------------------------------------------------------------------
+    Features::overrideForTesting(['CALENDAR' => false] + Features::all());
+    $before = count(calendarRequests());
+    $off = CallbackService::create($ctx, $person, ['e164' => '+919876500064', 'due_at' => Clock::iso($at(600)), 'create_calendar_event' => true]);
+    T::ok($off['ok'] && str_contains((string) $off['message'], 'not connected'), 'with Calendar off the callback is saved and says nothing was added');
+    T::same(['not_connected', $before], [$off['callback']['calendar']['state'], count(calendarRequests())], 'and nothing is sent');
+    Features::overrideForTesting(null);
+
+    // --- Due times without an offset are the company's local time -------------------
+    Settings::save(Context::forCompany(4003), ['timezone' => 'Asia/Kolkata'], 'test');
+    Settings::resetForTesting();
+    $kolkata = scope(4003, $person);
+    $local = CallbackService::create($kolkata, $person, ['e164' => '+919876500065', 'due_at' => '2031-10-13 15:00', 'create_calendar_event' => true]);
+    T::same('2031-10-13T09:30:00Z', Clock::iso(Clock::parse((string) CallbackService::row($kolkata, (int) $local['callback']['callback_id'])['due_at'])),
+        '"15:00" from a Kolkata company is 09:30Z, not 15:00 in the server’s zone');
+    $last = calendarRequests('POST');
+    $last = end($last);
+    T::same(['2031-10-13T09:30:00Z', 'Asia/Kolkata'], [$last['body']['start_at'] ?? null, $last['body']['timezone'] ?? null],
+        'and the entry carries the instant with Z and the company’s zone');
+
+    // --- Before promising a time: the diary check -------------------------------------
+    calendarSeedEvent(AGENT_A, Clock::iso($at(700)), Clock::iso($at(760)));
+    $check = static fn (int $minutes, array $more = []): array => $request('GET', '/v1/callbacks/diary-check', [],
+        ['due_at' => Clock::iso($at($minutes)), 'assigned_agent_id' => (string) $agentA] + $more)['body']['data'] ?? [];
+    $busyCheck = $check(720);
+    T::same('busy', $busyCheck['state'] ?? null, 'the diary check reports a clash');
+    T::same([['start_at' => Clock::iso($at(700)), 'end_at' => Clock::iso($at(760)), 'all_day' => false]], $busyCheck['conflicts'] ?? null,
+        'with times only — nothing about what the other entry is');
+    $cc = calendarRequests('POST', 'calendar/conflict-check');
+    $cc = end($cc);
+    T::same(['subscribers' => [AGENT_A], 'start_at' => Clock::iso($at(720)), 'end_at' => Clock::iso($at(735)), 'ignore_event_ids' => []],
+        $cc['body'] ?? null, 'asked as POST calendar/conflict-check with the v1 body');
+    T::same('free', $check(760)['state'] ?? null, 'back-to-back is free (half-open)');
+    calendarStubFlag('stale', [AGENT_A]);
+    T::same('unverified', $check(800)['state'] ?? null, 'checked:false is "unverified", never "free"');
+    calendarStubFlag('stale', []);
+    $ownEntry = CallbackService::create($ctx, $person, ['e164' => '+919876500066', 'due_at' => Clock::iso($at(900)),
+        'assigned_agent_id' => $agentA, 'create_calendar_event' => true]);
+    $ownCheck = $check(905, ['callback_id' => (string) $ownEntry['callback']['callback_id']]);
+    $cc = calendarRequests('POST', 'calendar/conflict-check');
+    $cc = end($cc);
+    T::same(['free', [$ownEntry['callback']['calendar_event_ref']]], [$ownCheck['state'] ?? null, $cc['body']['ignore_event_ids'] ?? null],
+        'moving a callback, its own entry is ignored');
+
+    // --- The queue explains itself truthfully -----------------------------------------
+    $list = $request('GET', '/v1/callbacks');
+    $note = (string) ($list['body']['meta']['calendar_note'] ?? '');
+    T::ok(!str_contains($note, 'read from Calendar') && str_contains($note, 'Voice sends no reminder') && str_contains($note, 'cannot be moved from Calendar'),
+        'the queue’s note says what a diary entry is, and that Voice sends no reminder');
+    T::same(true, $list['body']['meta']['calendar']['enabled'] ?? null, 'and whether Calendar is switched on');
+
+    clearHeaders();
+    stubReset();
+}
+
+// ===========================================================================
+T::group('27. Calendar reads and the Integrations probe');
+// ===========================================================================
+{
+    stubReset();
+    $client = (new CalendarClient())->forSubscriber(AGENT_A)->forCompany(CMP);
+    $start = Clock::iso(Clock::now()->modify('+5 days')->setTime(9, 0));
+    $end = Clock::iso(Clock::now()->modify('+5 days')->setTime(18, 0));
+    calendarSeedEvent(AGENT_A, Clock::iso(Clock::now()->modify('+5 days')->setTime(10, 0)), Clock::iso(Clock::now()->modify('+5 days')->setTime(11, 0)));
+
+    $fb = $client->freeBusy([AGENT_A, AGENT_B], $start, $end);
+    $sent = calendarRequests('GET', 'calendar/free-busy');
+    T::same(['subscribers' => AGENT_A . ',' . AGENT_B, 'start' => $start, 'end' => $end], $sent[0]['query'] ?? null,
+        'free/busy is GET calendar/free-busy?subscribers=&start=&end=');
+    $rows = $fb['body']['data']['subscribers'] ?? [];
+    T::same([1, 0], [count($rows[0]['busy'] ?? []), count($rows[1]['busy'] ?? [])], 'and answers busy blocks per person');
+    T::ok(!isset($rows[0]['busy'][0]['title']) && !isset($rows[0]['busy'][0]['event_id']), 'times only, no id for another product’s event');
+
+    $cc = $client->conflictCheck([AGENT_A], $start, $end);
+    T::same([true, false], [$cc['body']['data']['checked'] ?? null, $cc['body']['data']['free'] ?? null], 'conflict-check sees the clash');
+
+    // F12: an answer for one person is never handed to another.
+    $calls = static fn (): int => count(calendarRequests('GET', 'calendar/events'));
+    $before = $calls();
+    $client->lookup('x-1');
+    (new CalendarClient())->forSubscriber(AGENT_B)->forCompany(CMP)->lookup('x-1');
+    $client->lookup('x-1');
+    T::same($before + 3, $calls(), 'every Calendar read goes to Calendar — none is answered from memory');
+
+    $memo = new class () extends \Aicountly\Api\Clients\ApiClient {
+        public function service(): string { return 'memo-test'; }
+        protected function productionBase(): string { return ''; }
+        protected function sandboxBase(): string { return ''; }
+        protected function baseEnvKey(): string { return 'CALENDAR_API_BASE'; }
+    };
+    $before = count(calendarRequests());
+    $headersFor = static fn (string $actor): array => ['X-Service-Key' => 'test-calendar-service-key-0123456789', 'X-Actor-Uuid' => $actor];
+    $path = 'calendar/events?source_app=voice&source_ref=memo';
+    $first = $memo->request('GET', $path, null, $headersFor(AGENT_A));
+    $memo->request('GET', $path, null, $headersFor(AGENT_A));
+    $memo->request('GET', $path, null, $headersFor(AGENT_B));
+    T::same($before + 2, count(calendarRequests()), 'the shared memo keys on the person named, so two people make two reads');
+    T::ok($first['ok'], 'and a repeat for the same person is still answered from the request memo');
+
+    // A request for somebody who is not a subscriber never leaves Voice.
+    $before = count(calendarRequests());
+    $refused = (new CalendarClient())->forSubscriber('service:lobby')->createEvent(['title' => 'x'], 'voice-test-key-1');
+    T::same([false, 422, 'invalid_actor', $before], [$refused['ok'], $refused['status'], $refused['body']['code'] ?? null, count(calendarRequests())],
+        'a non-subscriber actor is refused locally, before any request');
+
+    // F10: Integrations reports what Calendar answered to Voice's own key.
+    Auth::adopt($person);
+    Context::trustForTesting(CMP, $person);
+    $probe = static function (): array {
+        $answer = request('GET', '/v1/integrations', ['cmp_id' => (string) CMP, 'probe' => '1']);
+        foreach ($answer['body']['data']['integrations'] ?? [] as $entry) {
+            if ($entry['app'] === 'calendar') {
+                return $entry;
+            }
+        }
+
+        return [];
+    };
+    $ok = $probe();
+    $fbProbe = calendarRequests('GET', 'calendar/free-busy');
+    $fbProbe = end($fbProbe);
+    T::same('connected', $ok['status'] ?? null, 'with an accepted key Calendar is connected');
+    T::same([PERSON, PERSON, 'cmp:' . CMP], [$fbProbe['headers']['x-actor-uuid'] ?? null, $fbProbe['query']['subscribers'] ?? null, $fbProbe['headers']['x-tenant-ref'] ?? null],
+        'proven by an authenticated free/busy read for the viewer, not by /health');
+    stubMode('calendar', 'reject_key');
+    $bad = $probe();
+    T::ok(($bad['status'] ?? null) === 'degraded' && str_contains((string) ($bad['reason'] ?? ''), 'service key'),
+        'a rejected key is degraded, and the reason names the key');
+    stubMode('calendar', 'pre_v1');
+    $old = $probe();
+    T::ok(($old['status'] ?? null) === 'degraded' && str_contains((string) ($old['reason'] ?? ''), 'contract'),
+        'a Calendar without contract v1 is degraded too');
+    stubMode('calendar', 'up');
+    Auth::adopt($owner);
+    $untestable = $probe();
+    T::same('configured', $untestable['status'] ?? null, 'a viewer with no subscriber id cannot prove the key, and it says configured, not connected');
+
+    clearHeaders();
+    stubReset();
+}
+
+// ===========================================================================
+T::group('28. A callback request is claimed before it runs');
+// ===========================================================================
+{
+    Auth::adopt($person);
+    Context::trustForTesting(CMP, $person, true);
+    $post = static fn (array $body, string $key): array
+        => request('POST', '/v1/callbacks', ['cmp_id' => (string) CMP], $body, ['Idempotency-Key' => $key]);
+    $count = static fn (string $e164): int => (int) Db::scalar('SELECT COUNT(*) FROM voice_callbacks WHERE e164 = :n', ['n' => $e164]);
+    $claim = static fn (string $key, string $age = '0 minutes'): mixed => Db::run(
+        "INSERT INTO voice_idempotency_keys (cmp_id, scope, idempotency_key, response_status, response_body, created_at)
+         VALUES (:c, 'callback.create', :k, 0, '{}'::jsonb, NOW() - CAST(:age AS INTERVAL))",
+        ['c' => CMP, 'k' => $key, 'age' => $age],
+    );
+
+    // Another copy of this request is still running and holds the claim.
+    $key = 'cb-claim-' . substr(Uuid::v4(), 0, 12);
+    $claim($key);
+    $busy = $post(['e164' => '+919876500070'], $key);
+    T::same([409, 'request_in_progress', 0], [$busy['status'], $busy['body']['error']['code'] ?? null, $count('+919876500070')],
+        'a repeat while the first copy is still running is 409, and creates nothing');
+
+    // Once the first copy has answered, a repeat gets that answer.
+    Db::run('DELETE FROM voice_idempotency_keys WHERE idempotency_key = :k', ['k' => $key]);
+    $first = $post(['e164' => '+919876500070'], $key);
+    $again = $post(['e164' => '+919876500070'], $key);
+    T::same([201, 201, 1], [$first['status'], $again['status'], $count('+919876500070')], 'the first creates, the repeat replays, one callback');
+    T::same($first['body']['data']['callback_id'] ?? 'a', $again['body']['data']['callback_id'] ?? 'b', 'and the repeat names the same callback');
+
+    // A refused request gives its claim back, so a corrected retry can run.
+    $badKey = 'cb-claim-' . substr(Uuid::v4(), 0, 12);
+    $bad = $post(['e164' => 'not a number'], $badKey);
+    T::same([422, 0], [$bad['status'], (int) Db::scalar('SELECT COUNT(*) FROM voice_idempotency_keys WHERE idempotency_key = :k', ['k' => $badKey])],
+        'a refused request leaves no claim behind');
+
+    // A claim left by a request that died stops blocking after a few minutes.
+    $deadKey = 'cb-claim-' . substr(Uuid::v4(), 0, 12);
+    $claim($deadKey, '10 minutes');
+    T::same(201, $post(['e164' => '+919876500071'], $deadKey)['status'], 'a claim abandoned minutes ago no longer blocks');
+
+    clearHeaders();
+}
+
+// ===========================================================================
+T::group('29. Before migration 010, callbacks work and the diary says why it cannot');
+// ===========================================================================
+{
+    stubReset();
+    Auth::adopt($person);
+    Context::trustForTesting(CMP, $person, true);
+    $before = count(calendarRequests());
+    $seen = [];
+    try {
+        Db::transaction(static function () use (&$seen): void {
+            // The schema as it was before 010, for this transaction only.
+            Db::run('ALTER TABLE voice_callbacks
+                DROP COLUMN exact_time, DROP COLUMN calendar_requested, DROP COLUMN calendar_owner_uuid,
+                DROP COLUMN calendar_source_ref, DROP COLUMN calendar_version, DROP COLUMN calendar_ref_seq,
+                DROP COLUMN calendar_due_at, DROP COLUMN calendar_state, DROP COLUMN calendar_detail,
+                DROP COLUMN calendar_checked_at');
+            Db::run('ALTER TABLE voice_external_operations DROP COLUMN request_body');
+            CallbackDiary::forgetSchemaForTesting();
+
+            $seen['create'] = request('POST', '/v1/callbacks', ['cmp_id' => (string) CMP], [
+                'e164' => '+919876500080', 'due_at' => Clock::iso(Clock::now()->modify('+1 day')), 'create_calendar_event' => true,
+            ]);
+            $id = (int) ($seen['create']['body']['data']['callback_id'] ?? 0);
+            $seen['update'] = request('PUT', '/v1/callbacks/' . $id, ['cmp_id' => (string) CMP], ['due_at' => Clock::iso(Clock::now()->modify('+2 days'))]);
+            $seen['list'] = request('GET', '/v1/callbacks', ['cmp_id' => (string) CMP]);
+
+            throw new \RuntimeException('roll back');
+        });
+    } catch (\RuntimeException $e) {
+        // Rolled back: the columns are there again.
+    }
+    CallbackDiary::forgetSchemaForTesting();
+
+    T::same(201, $seen['create']['status'] ?? null, 'a callback is still created without the new columns');
+    T::ok(str_contains((string) ($seen['create']['body']['message'] ?? ''), 'missing migration 010'),
+        'and the diary entry it asked for is refused, naming the migration');
+    T::same(200, $seen['update']['status'] ?? null, 'it can still be rescheduled');
+    T::same([false, CallbackDiary::SCHEMA_MISSING_REASON],
+        [$seen['list']['body']['meta']['calendar']['enabled'] ?? null, $seen['list']['body']['meta']['calendar']['reason'] ?? null],
+        'the queue lists it and says diary entries are unavailable, and why');
+    T::same($before, count(calendarRequests()), 'and nothing is sent to Calendar');
+    T::ok(CallbackDiary::schemaReady(), 'with the migration in place the diary path is available again');
+
+    clearHeaders();
+}
+
+// ===========================================================================
+T::group('30. A booking step validates only when something books it');
+// ===========================================================================
+{
+    $capabilities = ProviderRegistry::forCompany(scope(CMP, $owner))->capabilities();
+    $bookingFlow = static fn (string $action): array => [
+        'entry' => 'check',
+        'nodes' => [
+            'check'   => ['type' => 'api_action', 'action' => 'check_availability', 'next' => 'confirm', 'on_failure' => 'person'],
+            'confirm' => ['type' => 'confirm', 'timeout_seconds' => 10, 'next' => 'act', 'timeout' => 'person'],
+            'act'     => ['type' => 'api_action', 'action' => $action, 'next' => 'bye', 'on_failure' => 'person'],
+            'person'  => ['type' => 'handover', 'destination' => 'reception'],
+            'bye'     => ['type' => 'end_call'],
+        ],
+    ];
+    $permissions = [
+        'check_availability' => 'allowed', 'create_booking' => 'confirm_with_caller', 'reschedule_booking' => 'confirm_with_caller',
+        'cancel_booking' => 'confirm_with_caller', 'create_payment_link' => 'confirm_with_caller',
+    ];
+    $codesAt = static fn (array $v, string $node): array => array_column(array_filter($v['errors'], static fn (array $e): bool => $e['node'] === $node), 'code');
+
+    $on = FlowValidator::validate($bookingFlow('create_booking'), $capabilities, $permissions);
+    T::ok($on['valid'], 'with Appointments connected, a confirmed booking flow is valid');
+
+    putenv('VOICE_APPOINTMENTS_ENABLED=0');
+    Features::overrideForTesting(null);
+    $off = FlowValidator::validate($bookingFlow('create_booking'), $capabilities, $permissions);
+    T::ok(!$off['valid'] && in_array('action_unavailable', $codesAt($off, 'act'), true) && in_array('action_unavailable', $codesAt($off, 'check'), true),
+        'with Appointments off, booking and availability steps are errors (F5)');
+    $message = (string) (array_values(array_filter($off['errors'], static fn (array $e): bool => $e['node'] === 'act'))[0]['message'] ?? '');
+    T::same('"Create a booking" is not available in this deployment: Voice books through Aicountly Appointments, which is not connected here. Turned off for this deployment. Set VOICE_APPOINTMENTS_ENABLED=1 in the server environment to enable it.',
+        $message, 'and the error names the reason and the switch');
+
+    // The agent cannot be published past it.
+    $ctx = scope(CMP, $owner);
+    $flowId = (int) Db::insert('voice_call_flows', ['cmp_id' => CMP, 'name' => 'Booking flow'], 'flow_id');
+    $flowVersion = (int) Db::insert('voice_call_flow_versions', [
+        'flow_id' => $flowId, 'cmp_id' => CMP, 'version_no' => 1, 'status' => 'published', 'definition' => $bookingFlow('create_booking'),
+    ], 'version_id');
+    Db::update('voice_call_flows', ['published_version_id' => $flowVersion], ['flow_id' => $flowId]);
+    $agentId = (int) Db::insert('voice_ai_agents', ['cmp_id' => CMP, 'name' => 'Booker', 'status' => 'draft'], 'ai_agent_id');
+    AiAgentService::saveDraft($ctx, $owner, $agentId, [
+        'languages' => ['en'], 'flow_id' => $flowId, 'action_permissions' => $permissions,
+        'guardrails' => ['silence_timeout_seconds' => 8, 'max_clarifications' => 2],
+    ]);
+    $refused = AiAgentService::publish($ctx, $owner, $agentId);
+    T::ok(!$refused['ok'] && in_array('action_unavailable', array_column($refused['validation']['errors'] ?? [], 'code'), true),
+        'an agent whose flow books cannot be published while Appointments is off');
+
+    putenv('VOICE_APPOINTMENTS_ENABLED');
+    Features::overrideForTesting(null);
+    T::ok(AiAgentService::publish($ctx, $owner, $agentId)['ok'], 'and can be once it is connected');
+
+    foreach (['reschedule_booking' => 'Move a booking', 'cancel_booking' => 'Cancel a booking', 'create_payment_link' => 'Send a payment link'] as $action => $label) {
+        $never = FlowValidator::validate($bookingFlow($action), $capabilities, $permissions);
+        $text = (string) (array_values(array_filter($never['errors'], static fn (array $e): bool => $e['node'] === 'act'))[0]['message'] ?? '');
+        T::ok(!$never['valid'] && str_starts_with($text, '"' . $label . '" is not available in this deployment')
+            && str_ends_with($text, 'Remove this step and hand the caller to a person.'),
+            '"' . $label . '" has no supported executor and is refused whatever the flags say');
+    }
+}
+
+// ===========================================================================
+T::group('31. An AI agent books through Appointments, once, or hands over');
+// ===========================================================================
+{
+    stubReset();
+    $ctx = scope(CMP, $owner);
+    $gateway = Auth::forTesting('service:gateway', 'service', 'gateway');
+    // The Gateway acts with no person, so the company must be bound to its key (ServicePolicy).
+    putenv('SERVICE_KEY_COMPANIES=gateway:' . CMP);
+    $service = appointmentsSeedService(CMP, ['name' => 'Tax consultation']);
+    $member = Uuid::v4();
+    $at = static fn (int $days, int $hour, int $minute = 0): string => Clock::iso(Clock::now()->modify('+' . $days . ' days')->setTime($hour, $minute));
+    foreach ([[2, 4], [2, 5], [2, 6], [3, 4], [3, 5], [3, 6], [4, 4], [4, 5]] as [$day, $hour]) {
+        appointmentsSeedOffer($service, $member, $at($day, $hour));
+    }
+
+    $versionId = (int) Db::insert('voice_ai_agent_versions', [
+        'ai_agent_id' => (int) Db::insert('voice_ai_agents', ['cmp_id' => CMP, 'name' => 'Desk', 'status' => 'published'], 'ai_agent_id'),
+        'cmp_id' => CMP, 'version_no' => 1, 'status' => 'published',
+        'action_permissions' => ['check_availability' => 'allowed', 'create_booking' => 'confirm_with_caller', 'reschedule_booking' => 'confirm_with_caller'],
+    ], 'version_id');
+    $newCall = static function (?string $number = '+919876500011') use ($versionId): int {
+        return (int) Db::insert('voice_calls', [
+            'call_uuid' => Uuid::v4(), 'cmp_id' => CMP, 'direction' => 'inbound', 'remote_e164' => $number,
+            'ai_version_id' => $versionId, 'handled_by' => 'ai', 'state' => 'answered',
+        ], 'call_id');
+    };
+    $act = static function (int $callId, string $action, string $toolCallId, array $arguments = [], bool $confirmed = true, ?Auth $as = null) use ($gateway): array {
+        Auth::adopt($as ?? $gateway);
+
+        return request('POST', '/v1/calls/' . $callId . '/ai-actions', ['cmp_id' => (string) CMP], [
+            'action' => $action, 'tool_call_id' => $toolCallId, 'arguments' => $arguments, 'caller_confirmed' => $confirmed,
+        ]);
+    };
+    $callId = $newCall();
+
+    Context::trustForTesting(CMP, $owner);
+    $byUser = $act($callId, 'check_availability', 'tc-0', ['service_uuid' => $service], true, $owner);
+    $byLobby = $act($callId, 'check_availability', 'tc-0', ['service_uuid' => $service], true, Auth::forTesting('service:lobby', 'service', 'lobby'));
+    T::same([403, 403], [$byUser['status'], $byLobby['status']], 'only the Voice Gateway may run an agent’s action — not a person, not another product');
+
+    $slots = $act($callId, 'check_availability', 'tc-1', ['service_uuid' => $service]);
+    $first = $slots['body']['data']['slots'][0] ?? [];
+    T::ok(($slots['body']['data']['outcome'] ?? null) === 'slots' && count($slots['body']['data']['slots']) === 3
+        && str_starts_with((string) $slots['body']['data']['say'], 'I can offer '),
+        'availability comes from Appointments’ own slots, offered in words');
+    $sentSlots = appointmentsRequests('GET', 'v1/availability/slots');
+    T::same(['test-appointments-service-key-0123456789', (string) CMP, $service],
+        [$sentSlots[0]['headers']['x-service-key'] ?? null, $sentSlots[0]['query']['cmp_id'] ?? null, $sentSlots[0]['query']['service_uuid'] ?? null],
+        'asked with Voice’s Appointments key, for the call’s company');
+
+    $book = ['service_uuid' => $service, 'member_uuid' => $first['member_uuid'] ?? '', 'starts_at' => $first['starts_at'] ?? '', 'client_name' => 'Asha Rao'];
+    $unconfirmed = $act($callId, 'create_booking', 'tc-2', $book, false);
+    T::same([409, 'confirmation_required', 0], [$unconfirmed['status'], $unconfirmed['body']['error']['code'] ?? null, count(appointmentsRequests('POST'))],
+        'a booking without the caller’s confirmation is refused before anything is sent');
+
+    $booked = $act($callId, 'create_booking', 'tc-2', $book);
+    $data = $booked['body']['data'] ?? [];
+    $posts = appointmentsRequests('POST', 'v1/bookings');
+    T::ok(($data['outcome'] ?? null) === 'booked' && ($data['confirmed'] ?? null) === true && str_starts_with((string) ($data['booking']['reference'] ?? ''), 'APT-'),
+        'a booking Appointments answered with is confirmed, with its reference');
+    T::ok(str_starts_with((string) ($data['say'] ?? ''), "You're booked for ") && str_ends_with((string) $data['say'], 'Your booking reference is ' . $data['booking']['reference'] . '.'),
+        'and only then does the agent say "booked"');
+    T::same(['voice:ai:' . $callId . ':tc-2', '+919876500011', null, null],
+        [$posts[0]['headers']['idempotency-key'] ?? null, $posts[0]['body']['client_phone'] ?? null, $posts[0]['body']['override_rules'] ?? null, $posts[0]['body']['status'] ?? null],
+        'sent once, under the tool call’s own Idempotency-Key, for the caller’s number, never as an override');
+    $op = Db::first("SELECT * FROM voice_external_operations WHERE target_app = 'appointments' AND correlation_id = :c", ['c' => 'voice:ai:' . $callId . ':tc-2']);
+    T::same([ExternalOperations::SUCCEEDED, $data['booking']['booking_uuid']], [$op['status'] ?? null, $op['external_ref'] ?? null],
+        'the operation holds Appointments’ booking id, and no copy of the booking');
+
+    $again = $act($callId, 'create_booking', 'tc-2', $book);
+    T::same([true, $data['booking']['booking_uuid'], 1, 1],
+        [$again['body']['data']['confirmed'] ?? null, $again['body']['data']['booking']['booking_uuid'] ?? null, count(appointmentsRequests('POST')), count(appointmentsStub()['bookings'])],
+        'a retried tool call answers with the same booking and sends nothing new (F3)');
+    $reused = $act($callId, 'create_booking', 'tc-2', ['starts_at' => $at(3, 4)] + $book);
+    T::same([422, 'tool_call_reused'], [$reused['status'], $reused['body']['error']['code'] ?? null], 'one tool call id cannot stand for two different bookings');
+
+    // Somebody else took the time between the offer and the commit.
+    $taken = $at(2, 5);
+    appointmentsSeedBooking(CMP, $service, $member, $taken);
+    $lost = $act($callId, 'create_booking', 'tc-3', ['starts_at' => $taken] + $book)['body']['data'] ?? [];
+    T::ok(($lost['outcome'] ?? null) === 'slot_taken' && ($lost['confirmed'] ?? null) === false && count($lost['alternatives'] ?? []) > 0
+        && !in_array($taken, array_column($lost['alternatives'], 'starts_at'), true),
+        'slot taken: refused, never booked, and other free times are offered');
+    T::ok(str_starts_with((string) ($lost['say'] ?? ''), 'That time has just been taken. I can offer ') && stripos((string) $lost['say'], 'booked') === false,
+        'and the caller hears exactly that');
+    T::same(ExternalOperations::FAILED, (string) Db::scalar("SELECT status FROM voice_external_operations WHERE correlation_id = :c", ['c' => 'voice:ai:' . $callId . ':tc-3']),
+        'the attempt is recorded as refused by the owner, not unknown');
+
+    // A time Appointments does not offer.
+    $odd = $act($callId, 'create_booking', 'tc-4', ['starts_at' => $at(2, 4, 17)] + $book)['body']['data'] ?? [];
+    T::ok(($odd['outcome'] ?? null) === 'not_bookable' && str_starts_with((string) ($odd['say'] ?? ''), "I can't book that time. I can offer "),
+        'a time Appointments will not offer is not booked, and alternatives are offered');
+
+    // The answer is lost after Appointments booked: read back, adopt, one booking.
+    $postsBefore = count(appointmentsRequests('POST'));
+    stubMode('appointments', 'commit_then_drop');
+    $dropped = $act($callId, 'create_booking', 'tc-5', ['starts_at' => $at(3, 4)] + $book)['body']['data'] ?? [];
+    T::ok(($dropped['outcome'] ?? null) === 'booked' && count(appointmentsRequests('POST')) === $postsBefore + 1 && count(appointmentsStub()['bookings']) === 3,
+        'a lost answer is read back and the booking adopted — no second request, no second booking');
+
+    // The request is lost before Appointments acted: resent under the SAME key.
+    stubMode('appointments', 'drop_once');
+    $resent = $act($callId, 'create_booking', 'tc-6', ['starts_at' => $at(3, 5)] + $book)['body']['data'] ?? [];
+    $keys = array_column(array_column(array_slice(appointmentsRequests('POST'), -2), 'headers'), 'idempotency-key');
+    T::ok(($resent['outcome'] ?? null) === 'booked' && $keys === ['voice:ai:' . $callId . ':tc-6', 'voice:ai:' . $callId . ':tc-6'] && count(appointmentsStub()['bookings']) === 4,
+        'a request lost before Appointments acted is resent with the same Idempotency-Key, once');
+
+    // Lost answer AND no read-back: pending verification, a person follows up.
+    stubMode('appointments', 'commit_then_drop_lookup_down');
+    $unknown = $act($callId, 'create_booking', 'tc-7', ['starts_at' => $at(3, 6)] + $book)['body']['data'] ?? [];
+    T::ok(($unknown['outcome'] ?? null) === 'pending_verification' && ($unknown['confirmed'] ?? null) === false
+        && ($unknown['say'] ?? null) === "I've sent your booking request, but I can't confirm it yet, so please don't book again; I'll pass your request to the team, and someone will call you back.",
+        'when the outcome cannot be known the caller is told so — never "booked", never "failed"');
+    T::ok(($unknown['callback']['callback_id'] ?? 0) > 0 && (int) Db::scalar('SELECT COUNT(*) FROM voice_callbacks WHERE source_call_id = :c', ['c' => $callId]) === 1,
+        'and a callback exists before the agent promises one');
+    T::same(ExternalOperations::UNKNOWN, (string) Db::scalar("SELECT status FROM voice_external_operations WHERE correlation_id = :c", ['c' => 'voice:ai:' . $callId . ':tc-7']),
+        'the operation stays unknown');
+    stubMode('appointments', 'up');
+    $settled = $act($callId, 'create_booking', 'tc-7', ['starts_at' => $at(3, 6)] + $book)['body']['data'] ?? [];
+    T::ok(($settled['outcome'] ?? null) === 'booked' && count(appointmentsStub()['bookings']) === 5 && count(appointmentsRequests('POST')) === $postsBefore + 4,
+        'the retried tool call reads back and adopts that one booking, sending nothing new');
+    T::same(1, (int) Db::scalar('SELECT COUNT(*) FROM voice_callbacks WHERE source_call_id = :c', ['c' => $callId]), 'and makes no second callback');
+
+    // The recovery worker settles one the call never heard back about.
+    stubMode('appointments', 'commit_then_drop_lookup_down');
+    $act($callId, 'create_booking', 'tc-8', ['starts_at' => $at(4, 4)] + $book);
+    stubMode('appointments', 'up');
+    $postsBefore = count(appointmentsRequests('POST'));
+    $output = runRecovery();
+    T::ok(str_contains($output, 'operations_reconciled=')
+        && (string) Db::scalar("SELECT status FROM voice_external_operations WHERE correlation_id = :c", ['c' => 'voice:ai:' . $callId . ':tc-8']) === ExternalOperations::SUCCEEDED
+        && count(appointmentsStub()['bookings']) === 6 && count(appointmentsRequests('POST')) === $postsBefore,
+        'the recovery worker reads back and adopts the booking (no resend, still one)');
+
+    // Appointments said it did not take the booking: a person takes over; never resent.
+    stubMode('appointments', 'calendar_down');
+    $refused = $act($callId, 'create_booking', 'tc-9', ['starts_at' => $at(4, 5)] + $book)['body']['data'] ?? [];
+    T::ok(($refused['outcome'] ?? null) === 'refused' && ($refused['say'] ?? null) === "I can't book that from this call; I'll pass your request to the team, and someone will call you back.",
+        'a booking Appointments refused is handed to a person, in those words');
+    T::same(ExternalOperations::FAILED, (string) Db::scalar("SELECT status FROM voice_external_operations WHERE correlation_id = :c", ['c' => 'voice:ai:' . $callId . ':tc-9']),
+        'and is not left for a later resend behind the team’s back');
+
+    // Appointments not answering at all: nothing sent, hand-off.
+    stubMode('appointments', 'down');
+    $before = count(appointmentsRequests('POST'));
+    $down = $act($callId, 'create_booking', 'tc-10', ['starts_at' => $at(4, 5)] + $book)['body']['data'] ?? [];
+    T::ok(($down['outcome'] ?? null) === 'unavailable' && ($down['confirmed'] ?? null) === false && $before === count(appointmentsRequests('POST')),
+        'with Appointments down before the booking, nothing is sent and the caller is handed over');
+    stubMode('appointments', 'up');
+
+    // A deposit Voice cannot take on a call.
+    $paid = appointmentsSeedService(CMP, ['name' => 'Paid session', 'deposit_required' => true, 'deposit_minor' => 50000]);
+    $deposit = $act($callId, 'create_booking', 'tc-11', ['service_uuid' => $paid] + $book)['body']['data'] ?? [];
+    T::ok(($deposit['outcome'] ?? null) === 'not_bookable'
+        && str_starts_with((string) ($deposit['say'] ?? ''), "That appointment needs a deposit, which I can't take on this call; I'll pass your request"),
+        'a service that takes a deposit is handed to a person, not booked unpaid');
+
+    // A service that asks for confirmation: "requested", not "booked".
+    $approval = appointmentsSeedService(CMP, ['name' => 'Assessment', 'requires_confirmation' => true]);
+    appointmentsSeedOffer($approval, $member, $at(5, 4));
+    $requested = $act($callId, 'create_booking', 'tc-12', ['service_uuid' => $approval, 'starts_at' => $at(5, 4)] + $book)['body']['data'] ?? [];
+    T::ok(($requested['outcome'] ?? null) === 'requested' && str_starts_with((string) ($requested['say'] ?? ''), "I've requested "),
+        'a booking Appointments holds as PENDING is "requested", not "booked"');
+
+    // Moving a booking has no supported path: hand-off, whatever the flag.
+    $move = $act($callId, 'reschedule_booking', 'tc-13', ['booking_reference' => 'APT-1001'])['body']['data'] ?? [];
+    T::same(['handoff', false, "I can't move that booking from this call; I'll pass your request to the team, and someone will call you back."],
+        [$move['outcome'] ?? null, $move['confirmed'] ?? null, $move['say'] ?? null], 'moving a booking is handed to a person, with a callback');
+    $denied = $act($callId, 'cancel_booking', 'tc-14');
+    T::same([403, 'not_permitted'], [$denied['status'], $denied['body']['error']['code'] ?? null], 'an action the agent version may not take is refused');
+
+    // Switched off: no request at all, the exact words, one callback per tool call.
+    putenv('VOICE_APPOINTMENTS_ENABLED=0');
+    Features::overrideForTesting(null);
+    $offCall = $newCall('+919876500012');
+    $requestsBefore = count(appointmentsStub()['log']);
+    $offAnswer = $act($offCall, 'create_booking', 'tc-1', $book)['body']['data'] ?? [];
+    T::same(['handoff', false, "I can't book that from this call; I'll pass your request to the team, and someone will call you back."],
+        [$offAnswer['outcome'] ?? null, $offAnswer['confirmed'] ?? null, $offAnswer['say'] ?? null],
+        'switched off, the agent says it cannot book from the call and passes it on (F3)');
+    $callback = Db::first('SELECT * FROM voice_callbacks WHERE source_call_id = :c', ['c' => $offCall]);
+    T::ok($callback !== null && $callback['priority'] === 'high' && $callback['e164'] === '+919876500012'
+        && str_contains((string) $callback['reason'], 'Create a booking') && str_contains((string) $callback['reason'], 'VOICE_APPOINTMENTS_ENABLED'),
+        'the callback carries the caller’s number and why the agent could not book');
+    $act($offCall, 'create_booking', 'tc-1', $book);
+    T::same([1, $requestsBefore], [(int) Db::scalar('SELECT COUNT(*) FROM voice_callbacks WHERE source_call_id = :c', ['c' => $offCall]), count(appointmentsStub()['log'])],
+        'a retried hand-off makes no second callback, and nothing reaches Appointments');
+    putenv('VOICE_APPOINTMENTS_ENABLED');
+    Features::overrideForTesting(null);
+
+    // No number to reach the caller on: no booking, and no promise of a callback.
+    $withheld = $act($newCall(null), 'create_booking', 'tc-1', $book)['body']['data'] ?? [];
+    T::same("I can't book that from this call without a number to reach you on, and I couldn't arrange a call back just now. Please ask for a person, or call us again.",
+        $withheld['say'] ?? null, 'with no number, no booking and no callback is promised');
+
+    Db::update('voice_calls', ['ended_at' => Clock::sql(Clock::now()), 'state' => 'completed'], ['call_id' => $callId]);
+    T::same(409, $act($callId, 'check_availability', 'tc-99', ['service_uuid' => $service])['status'], 'an ended call takes no actions');
+
+    Auth::adopt($owner);
+    clearHeaders();
+    putenv('SERVICE_KEY_COMPANIES');
+}
+
+// ===========================================================================
+T::group('32. Rehearsal checks run the booking code, or say they could not');
+// ===========================================================================
+{
+    $ctx = scope(CMP, $owner);
+    $agentId = (int) Db::scalar("SELECT ai_agent_id FROM voice_ai_agents WHERE cmp_id = :c AND name = 'Booker'", ['c' => CMP]);
+    $requestsBefore = count(appointmentsStub()['log']);
+    $opsBefore = (int) Db::scalar('SELECT COUNT(*) FROM voice_external_operations');
+    $checkOf = static function (array $run, string $key): array {
+        foreach ($run['run']['checks'] ?? [] as $check) {
+            if ($check['key'] === $key) {
+                return $check;
+            }
+        }
+
+        return [];
+    };
+
+    $twice = AiAgentService::rehearse($ctx, $owner, $agentId, 'duplicate_tool_call');
+    $check = $checkOf($twice, 'idempotent_external_writes');
+    T::ok(($check['status'] ?? null) === 'passed' && str_starts_with((string) $check['detail'], 'Simulated against a stand-in for Appointments'),
+        'the same booking twice is exercised through Voice’s booking code, and passes on evidence');
+    $down = AiAgentService::rehearse($ctx, $owner, $agentId, 'api_unavailable');
+    T::same('passed', $checkOf($down, 'no_local_fallback')['status'] ?? null, 'an owner that stops answering mid-booking claims nothing');
+    T::same([$requestsBefore, $opsBefore], [count(appointmentsStub()['log']), (int) Db::scalar('SELECT COUNT(*) FROM voice_external_operations')],
+        'a rehearsal sends nothing to Appointments and keeps nothing');
+
+    $plain = (int) Db::scalar("SELECT ai_agent_id FROM voice_ai_agents WHERE cmp_id = :c AND name = 'Asha'", ['c' => CMP]);
+    T::same('not_applicable', $checkOf(AiAgentService::rehearse($ctx, $owner, $plain, 'duplicate_tool_call'), 'idempotent_external_writes')['status'] ?? null,
+        'a flow that writes nothing elsewhere has nothing to repeat — not a pass');
+
+    $cancelFlow = (int) Db::insert('voice_call_flows', ['cmp_id' => CMP, 'name' => 'Cancel flow'], 'flow_id');
+    Db::update('voice_call_flows', ['draft_version_id' => (int) Db::insert('voice_call_flow_versions', [
+        'flow_id' => $cancelFlow, 'cmp_id' => CMP, 'version_no' => 1, 'status' => 'draft', 'definition' => [
+            'entry' => 'cancel', 'nodes' => ['cancel' => ['type' => 'api_action', 'action' => 'cancel_booking', 'next' => 'bye'], 'bye' => ['type' => 'end_call']],
+        ],
+    ], 'version_id')], ['flow_id' => $cancelFlow]);
+    $canceller = (int) Db::insert('voice_ai_agents', ['cmp_id' => CMP, 'name' => 'Canceller', 'status' => 'draft'], 'ai_agent_id');
+    AiAgentService::saveDraft($ctx, $owner, $canceller, ['flow_id' => $cancelFlow, 'guardrails' => ['silence_timeout_seconds' => 8, 'max_clarifications' => 2]]);
+    $cancelCheck = $checkOf(AiAgentService::rehearse($ctx, $owner, $canceller, 'duplicate_tool_call'), 'idempotent_external_writes');
+    T::ok(($cancelCheck['status'] ?? null) === 'failed' && str_contains((string) $cancelCheck['detail'], '"Cancel a booking" cannot run from a call'),
+        'a write nothing carries out fails the check instead of passing it');
+
+    $recording = AiAgentService::rehearse($ctx, $owner, $plain, 'declines_recording');
+    T::ok(($checkOf($recording, 'refusal_recorded')['status'] ?? null) === 'not_verified' && in_array($recording['run']['status'], ['not_verified', 'failed'], true),
+        'what a rehearsal cannot exercise is "not verified", and the run is not a pass');
+}
+
+// ===========================================================================
+T::group('33. Command Centre says "Connected" only after a real probe');
+// ===========================================================================
+{
+    stubReset();
+    Db::run('DELETE FROM voice_integrations WHERE cmp_id = :c', ['c' => CMP]);
+    Auth::adopt($person);
+    Context::trustForTesting(CMP, $person);
+    $workflows = static function (): array {
+        $out = [];
+        foreach (request('GET', '/v1/dashboards/command-centre', ['cmp_id' => (string) CMP])['body']['data']['panels']['workflows'] ?? [] as $entry) {
+            $out[$entry['app']] = $entry;
+        }
+
+        return $out;
+    };
+
+    $flagOnly = $workflows();
+    T::same(['enabled_unverified', 'enabled_unverified', 'enabled_unverified', 'not_configured'],
+        [$flagOnly['appointments']['status'] ?? null, $flagOnly['calendar']['status'] ?? null, $flagOnly['crm']['status'] ?? null, $flagOnly['pay']['status'] ?? null],
+        'a switched-on flag alone is "Enabled, not verified", never "Connected"');
+
+    request('GET', '/v1/integrations', ['cmp_id' => (string) CMP, 'probe' => '1']);
+    $probed = $workflows();
+    $sent = appointmentsRequests('GET', 'v1/services');
+    T::same(['connected', 'connected', 'test-appointments-service-key-0123456789'],
+        [$probed['appointments']['status'] ?? null, $probed['calendar']['status'] ?? null, end($sent)['headers']['x-service-key'] ?? null],
+        'an authenticated probe that succeeded earns "Connected"');
+    T::same('enabled_unverified', $probed['crm']['status'] ?? null, 'a health check alone does not (CRM has no authenticated probe)');
+
+    stubMode('appointments', 'reject_key');
+    request('GET', '/v1/integrations', ['cmp_id' => (string) CMP, 'probe' => '1']);
+    $rejected = $workflows();
+    T::ok(($rejected['appointments']['status'] ?? null) === 'degraded' && str_contains((string) ($rejected['appointments']['reason'] ?? ''), 'service key'),
+        'a rejected key shows as degraded, with the reason');
+
+    Auth::adopt($owner);
+    clearHeaders();
+    stubReset();
+}
+
+// ===========================================================================
+T::group('34. Campaigns say what an agent or a reminder cannot do');
+// ===========================================================================
+{
+    $ctx = scope(CMP, $owner);
+    $campaign = static fn (string $mode, array $extra = []): int => (int) Db::insert('voice_campaigns', $extra + [
+        'cmp_id' => CMP, 'name' => 'Honesty ' . $mode . ' ' . substr(Uuid::v4(), 0, 6), 'mode' => $mode, 'status' => 'draft',
+        'timezone' => 'UTC', 'window_start_min' => 0, 'window_end_min' => 1440, 'window_days' => [0, 1, 2, 3, 4, 5, 6],
+        'script' => ['body' => 'This is a reminder from the clinic.', 'reviewed' => true, 'audience_purpose' => 'Existing appointments'],
+    ], 'campaign_id');
+    $checkOf = static function (array $validation, string $key): array {
+        foreach ($validation['checks'] as $check) {
+            if ($check['key'] === $key) {
+                return $check;
+            }
+        }
+
+        return [];
+    };
+
+    $reminder = $checkOf(CampaignService::validate($ctx, $campaign('appointment_reminder')), 'appointment_source');
+    T::same(['warn', CampaignService::REMINDER_LIMITATION], [$reminder['status'] ?? null, $reminder['message'] ?? null],
+        'an appointment reminder campaign states that nothing reads the appointment (voice-aicountly-F16)');
+
+    $booker = (int) Db::scalar("SELECT ai_agent_id FROM voice_ai_agents WHERE cmp_id = :c AND name = 'Booker'", ['c' => CMP]);
+    $aiCampaign = $campaign('ai_conversation', ['ai_agent_id' => $booker]);
+    T::same('pass', $checkOf(CampaignService::validate($ctx, $aiCampaign), 'script')['status'] ?? null,
+        'an agent whose booking steps Appointments carries out may run a campaign');
+    putenv('VOICE_APPOINTMENTS_ENABLED=0');
+    Features::overrideForTesting(null);
+    $off = $checkOf(CampaignService::validate($ctx, $aiCampaign), 'script');
+    T::ok(($off['status'] ?? null) === 'error' && str_contains((string) ($off['message'] ?? ''), 'has a step nothing carries out here'),
+        'with Appointments off, the same published agent cannot launch a campaign (F5)');
+    putenv('VOICE_APPOINTMENTS_ENABLED');
+    Features::overrideForTesting(null);
 }
 
 exit(T::summary());

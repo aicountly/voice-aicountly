@@ -5,11 +5,9 @@ declare(strict_types=1);
 namespace Aicountly\Api\Domain;
 
 use Aicountly\Api\Auth;
-use Aicountly\Api\Clients\CalendarClient;
 use Aicountly\Api\Context;
 use Aicountly\Api\Db;
-use Aicountly\Api\ExternalOperations;
-use Aicountly\Api\Features;
+use Aicountly\Api\Settings;
 use Aicountly\Api\Support\Clock;
 
 /**
@@ -18,20 +16,22 @@ use Aicountly\Api\Support\Clock;
  * ## Why this is allowed to be a Voice table
  *
  * A callback is a CALL ATTEMPT PLAN: this number, this reason, by this time,
- * this many tries. That is calling-domain work and nothing else owns it.
+ * this many tries. That is calling-domain work and nothing else owns it — the
+ * due time included. Every list, the overdue filter and the Command Centre
+ * read `due_at` here, and it is the time.
  *
- * ## Where it stops being one
+ * ## Where it touches Calendar
  *
- * The moment a callback needs to occupy time in somebody's diary, it is a
- * calendar event — and Calendar owns those. So `schedule()` creates the event
- * THROUGH Calendar's API and stores `calendar_event_ref`. The time shown next
- * to a callback comes from Calendar when it is displayed. Voice does not keep a
- * second copy of the start time, because a copy is what stays wrong after
- * somebody moves it.
+ * When asked (`create_calendar_event`), the time also goes into a diary: a
+ * busy entry in the assigned agent's Aicountly Calendar, written and kept true
+ * by CallbackDiary — moved when the callback is rescheduled, cancelled when it
+ * is cancelled, moved to the new agent's diary when it is reassigned. Calendar
+ * holds that entry; Voice holds its reference. The entry follows the callback,
+ * never the other way round: it cannot be moved from Calendar's side.
  *
- * If Calendar is unreachable the callback is still created — it is Voice's own
- * record and perfectly useful without a diary entry — and the response says the
- * diary entry could not be made. It does not fabricate one locally.
+ * If Calendar cannot take the entry the callback is still created — it is
+ * Voice's own record and perfectly useful without one — and the answer says
+ * exactly what happened to the diary entry. Nothing is fabricated locally.
  */
 final class CallbackService
 {
@@ -46,9 +46,16 @@ final class CallbackService
             return ['ok' => false, 'code' => 'invalid_number', 'message' => 'That is not a number this system can dial.', 'callback' => null];
         }
 
-        $dueAt = Clock::parse((string) ($input['due_at'] ?? ''));
+        $dueAt = self::dueAt($ctx, $input['due_at'] ?? null);
+        $wantsDiary = !empty($input['create_calendar_event']);
+        // Before migration 010 a callback is saved exactly as it always was;
+        // only the diary entry is refused, and says why.
+        $diaryColumns = CallbackDiary::schemaReady() ? [
+            'exact_time'         => $dueAt !== null && !empty($input['exact_time']),
+            'calendar_requested' => $wantsDiary,
+        ] : [];
 
-        $callbackId = (int) Db::insert('voice_callbacks', [
+        $callbackId = (int) Db::insert('voice_callbacks', $diaryColumns + [
             'cmp_id'         => $ctx->cmpId,
             'bo_id'          => $ctx->boId,
             'source_call_id' => isset($input['source_call_id']) ? (int) $input['source_call_id'] : null,
@@ -67,9 +74,9 @@ final class CallbackService
         ], 'callback_id');
 
         $message = null;
-        if (!empty($input['create_calendar_event']) && $dueAt !== null) {
-            $calendar = self::addToCalendar($ctx, $auth, $callbackId, $e164, $dueAt, (string) ($input['reason'] ?? ''));
-            $message = $calendar['message'];
+        if ($wantsDiary) {
+            $diary = CallbackDiary::sync($ctx, $callbackId, ['create'], $auth->uuid);
+            $message = $diary['message'] === null ? null : 'The callback was saved. ' . $diary['message'];
         }
 
         return [
@@ -77,74 +84,6 @@ final class CallbackService
             'code'    => null,
             'message' => $message,
             'callback' => self::find($ctx, $callbackId),
-        ];
-    }
-
-    /**
-     * Put the callback in somebody's diary, through Calendar.
-     *
-     * @return array{ok: bool, message: ?string}
-     */
-    public static function addToCalendar(
-        Context $ctx,
-        Auth $auth,
-        int $callbackId,
-        string $e164,
-        \DateTimeImmutable $dueAt,
-        string $reason,
-    ): array {
-        $client = new CalendarClient();
-        if (!Features::enabled('CALENDAR') || !$client->configured()) {
-            return [
-                'ok' => false,
-                'message' => 'The callback was saved. Aicountly Calendar is not connected, so nothing was added to a diary.',
-            ];
-        }
-
-        $opened = ExternalOperations::begin(
-            $ctx,
-            'calendar',
-            'create_event',
-            ['starts_at' => Clock::iso($dueAt), 'kind' => 'callback'],
-            ['callback_id' => $callbackId],
-            $auth->uuid,
-        );
-
-        $result = $client
-            ->forSubscriber($auth->uuid)
-            ->withSession($auth->sesKey())
-            ->createEvent([
-                'cmp_id'     => $ctx->cmpId,
-                'bo_id'      => $ctx->boId,
-                'title'      => 'Callback: ' . CallingPolicy::mask($e164),
-                'description' => $reason,
-                'start'      => Clock::iso($dueAt),
-                'end'        => Clock::iso($dueAt->modify('+15 minutes')),
-                'source'     => 'voice',
-                'source_ref' => (string) $callbackId,
-                'correlation_id' => $opened['correlation_id'],
-            ], $opened['correlation_id']);
-
-        $eventRef = self::extractRef($result['body'] ?? null);
-        $status = ExternalOperations::settle($opened['operation_id'], $result, $eventRef);
-
-        if ($status === ExternalOperations::SUCCEEDED) {
-            // The id, and only the id.
-            Db::update('voice_callbacks', [
-                'calendar_event_ref' => $eventRef,
-                'updated_at'         => Clock::sql(Clock::now()),
-            ], ['callback_id' => $callbackId, 'cmp_id' => $ctx->cmpId]);
-
-            return ['ok' => true, 'message' => null];
-        }
-
-        $operation = ExternalOperations::find($ctx, $opened['operation_id']);
-
-        return [
-            'ok' => false,
-            'message' => 'The callback was saved. ' . ($operation === null
-                ? 'The diary entry could not be created.'
-                : ExternalOperations::present($operation)['message']),
         ];
     }
 
@@ -160,6 +99,9 @@ final class CallbackService
         }
 
         $values = ['updated_at' => Clock::sql(Clock::now())];
+        // What changed that the diary entry follows. Reason and priority do
+        // not: neither is in the entry.
+        $changed = [];
 
         if (isset($input['status'])) {
             $status = (string) $input['status'];
@@ -167,6 +109,9 @@ final class CallbackService
                 return ['ok' => false, 'code' => 'unknown_status', 'message' => 'That is not a callback status.', 'callback' => null];
             }
             $values['status'] = $status;
+            if ($status !== (string) $row['status']) {
+                $changed[] = 'status';
+            }
         }
         foreach (['reason', 'priority'] as $field) {
             if (isset($input[$field]) && is_string($input[$field])) {
@@ -174,16 +119,47 @@ final class CallbackService
             }
         }
         if (array_key_exists('due_at', $input)) {
-            $dueAt = Clock::parse((string) $input['due_at']);
+            $dueAt = self::dueAt($ctx, $input['due_at']);
             $values['due_at'] = $dueAt === null ? null : Clock::sql($dueAt);
+            $before = Clock::parse($row['due_at'] === null ? null : (string) $row['due_at']);
+            if (($before === null) !== ($dueAt === null)
+                || ($before !== null && $dueAt !== null && $before->getTimestamp() !== $dueAt->getTimestamp())) {
+                $changed[] = 'due_at';
+            }
         }
         if (array_key_exists('assigned_agent_id', $input)) {
             $values['assigned_agent_id'] = $input['assigned_agent_id'] === null ? null : (int) $input['assigned_agent_id'];
+            if ($values['assigned_agent_id'] !== ($row['assigned_agent_id'] === null ? null : (int) $row['assigned_agent_id'])) {
+                $changed[] = 'assigned_agent_id';
+            }
+        }
+        $diaryReady = CallbackDiary::schemaReady();
+        if (array_key_exists('exact_time', $input) && $diaryReady) {
+            $values['exact_time'] = (bool) $input['exact_time'];
+            if ($values['exact_time'] !== self::flag($row['exact_time'])) {
+                $changed[] = 'exact_time';
+            }
+        }
+        if (array_key_exists('create_calendar_event', $input) && $diaryReady) {
+            $values['calendar_requested'] = (bool) $input['create_calendar_event'];
+            if ($values['calendar_requested'] !== self::flag($row['calendar_requested'])) {
+                $changed[] = 'create_calendar_event';
+            }
         }
 
         Db::update('voice_callbacks', $values, ['callback_id' => $callbackId, 'cmp_id' => $ctx->cmpId]);
 
-        return ['ok' => true, 'code' => null, 'message' => null, 'callback' => self::find($ctx, $callbackId)];
+        $message = null;
+        if (!$diaryReady) {
+            if (!empty($input['create_calendar_event']) || $row['calendar_event_ref'] !== null) {
+                $message = CallbackDiary::SCHEMA_MISSING;
+            }
+        } elseif ($changed !== [] && (self::flag($values['calendar_requested'] ?? $row['calendar_requested'])
+            || $row['calendar_event_ref'] !== null)) {
+            $message = CallbackDiary::sync($ctx, $callbackId, $changed, $auth->uuid)['message'];
+        }
+
+        return ['ok' => true, 'code' => null, 'message' => $message, 'callback' => self::find($ctx, $callbackId)];
     }
 
     /** @return array<string, mixed>|null */
@@ -215,15 +191,19 @@ final class CallbackService
             'e164_masked'    => CallingPolicy::mask((string) $row['e164']),
             'reason'         => (string) $row['reason'],
             'priority'       => (string) $row['priority'],
+            // The time. Voice's own: a diary entry follows it, never the reverse.
             'due_at'         => $row['due_at'],
+            'exact_time'     => self::flag($row['exact_time'] ?? false),
             'assigned_agent_id' => $row['assigned_agent_id'] === null ? null : (int) $row['assigned_agent_id'],
             'queue_id'       => $row['queue_id'] === null ? null : (int) $row['queue_id'],
             'status'         => (string) $row['status'],
             'attempts'       => (int) $row['attempts'],
             'max_attempts'   => (int) $row['max_attempts'],
             'last_attempt_at' => $row['last_attempt_at'],
-            // The reference only. The event's time is read from Calendar.
+            // Calendar's id for the diary entry, when there is one. Nothing
+            // about the event itself is kept or shown from here.
             'calendar_event_ref' => $row['calendar_event_ref'],
+            'calendar'       => CallbackDiary::present($row),
             'created_at'     => $row['created_at'],
         ];
     }
@@ -235,23 +215,26 @@ final class CallbackService
         return $value === '' ? null : $value;
     }
 
-    /** @param array<string, mixed>|null $body */
-    private static function extractRef(?array $body): ?string
+    /**
+     * A due time as somebody gave it. One without an offset is read in the
+     * company's own timezone (Settings), never the server's: "15:00" from a
+     * company in Kolkata is 09:30Z.
+     */
+    private static function dueAt(Context $ctx, mixed $value): ?\DateTimeImmutable
     {
-        if ($body === null) {
+        if (!is_scalar($value)) {
             return null;
         }
-        foreach ([$body, $body['data'] ?? []] as $candidate) {
-            if (!is_array($candidate)) {
-                continue;
-            }
-            foreach (['event_uuid', 'event_id', 'uuid', 'id'] as $key) {
-                if (isset($candidate[$key]) && is_scalar($candidate[$key]) && (string) $candidate[$key] !== '') {
-                    return (string) $candidate[$key];
-                }
-            }
+
+        return Clock::parseIn((string) $value, Clock::zone((string) (Settings::forCompany($ctx->cmpId)['timezone'] ?? '')));
+    }
+
+    private static function flag(mixed $value): bool
+    {
+        if (is_bool($value)) {
+            return $value;
         }
 
-        return null;
+        return in_array(strtolower(trim((string) $value)), ['1', 't', 'true', 'yes'], true);
     }
 }

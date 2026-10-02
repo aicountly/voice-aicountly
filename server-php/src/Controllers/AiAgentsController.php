@@ -6,6 +6,7 @@ namespace Aicountly\Api\Controllers;
 
 use Aicountly\Api\Ai\AiClient;
 use Aicountly\Api\Db;
+use Aicountly\Api\Domain\AiActions;
 use Aicountly\Api\Domain\AiAgentService;
 use Aicountly\Api\Domain\FlowValidator;
 use Aicountly\Api\Http;
@@ -28,6 +29,8 @@ final class AiAgentsController extends Controller
         Http::data([
             'agents' => array_map(static fn (array $r): array => self::present($r), $rows),
             'tools'  => AiClient::TOOLS,
+            // Which action steps something in this deployment carries out.
+            'tool_availability' => AiActions::describe(),
             'ai'     => AiClient::describeAvailability($auth),
             'node_types' => FlowValidator::NODE_TYPES,
             'provider_capabilities' => ProviderRegistry::forCompany($ctx)->capabilities(),
@@ -71,6 +74,7 @@ final class AiAgentsController extends Controller
                 ),
             ),
             'tools' => AiClient::TOOLS,
+            'tool_availability' => AiActions::describe(),
         ]);
     }
 

@@ -23,7 +23,9 @@ use Aicountly\Api\Support\Uuid;
  *           booking nobody will turn up to.
  *   WRONG — send it again. That is how one caller gets two appointments.
  *   RIGHT — record the outcome as UNKNOWN, say so, and find out from Calendar,
- *           through Calendar's API, using the correlation id we sent.
+ *           through Calendar's API: for Calendar, the source_ref lookup, and
+ *           only then the SAME attempt under the SAME Idempotency-Key (our
+ *           correlation id), which Calendar replays rather than repeats.
  *
  * That is the whole design. `status` distinguishes succeeded, failed and
  * unknown, and only an authoritative acknowledgement from the owner API ever
@@ -48,6 +50,13 @@ final class ExternalOperations
     public const UNKNOWN    = 'unknown';
     public const RECONCILED = 'reconciled';
     public const ABANDONED  = 'abandoned';
+    /**
+     * The owner refused BEFORE acting — its credentials, scope or schema are
+     * not ready — so nothing happened there and the SAME attempt is sent again
+     * later. Not failed (a configuration fix makes it work) and not unknown
+     * (the owner told us it did not act).
+     */
+    public const DEFERRED   = 'deferred';
 
     /** How long to keep asking the owner API about an unknown before a human is asked instead. */
     private const MAX_RECONCILE_ATTEMPTS = 6;
@@ -60,8 +69,14 @@ final class ExternalOperations
      * started. An operation only discovered after a successful response is an
      * operation that cannot be recovered from a crash.
      *
+     * `$wire` is for an owner whose writes can be replayed (Calendar v1): the
+     * exact request — owner_uuid, source_ref, request_method, request_path,
+     * request_body, if_match — so a retry of THIS attempt is the same request
+     * under the same key. It is our request, not their record.
+     *
      * @param array<string, mixed> $requestSummary what we asked for — never the foreign record
      * @param array<string, int|null> $links call_id / commitment_id / callback_id
+     * @param array<string, mixed> $wire
      * @return array{operation_id:int, correlation_id:string}
      */
     public static function begin(
@@ -72,10 +87,11 @@ final class ExternalOperations
         array $links = [],
         ?string $actor = null,
         ?string $correlationId = null,
+        array $wire = [],
     ): array {
         $correlationId ??= 'voice-' . Uuid::v4();
 
-        $operationId = (int) Db::insert(self::TABLE, [
+        $values = [
             'cmp_id'          => $ctx->cmpId,
             'bo_id'           => $ctx->boId,
             'target_app'      => $targetApp,
@@ -90,9 +106,37 @@ final class ExternalOperations
             'attempts'        => 1,
             'last_attempt_at' => Clock::sql(Clock::now()),
             'created_by'      => $actor,
-        ], 'operation_id');
+        ];
+        foreach (['owner_uuid', 'source_ref', 'request_method', 'request_path', 'request_body', 'if_match', 'next_check_at'] as $column) {
+            if (array_key_exists($column, $wire)) {
+                $values[$column] = $wire[$column];
+            }
+        }
+
+        $operationId = (int) Db::insert(self::TABLE, $values, 'operation_id');
 
         return ['operation_id' => $operationId, 'correlation_id' => $correlationId];
+    }
+
+    /**
+     * Set an operation's status and whatever goes with it, in one statement.
+     *
+     * For callers that classify the owner's answer themselves because the
+     * owner's contract says more than 2xx/4xx/5xx (Calendar v1: see
+     * Domain\CallbackDiary). The same rule holds: SUCCEEDED only with the
+     * owner's identifier in hand.
+     *
+     * @param array<string, mixed> $values
+     */
+    public static function mark(int $operationId, string $status, array $values = []): void
+    {
+        if ($status === self::SUCCEEDED && trim((string) ($values['external_ref'] ?? '')) === '') {
+            throw new \LogicException('An external operation cannot succeed without the owner\'s identifier.');
+        }
+
+        Db::update(self::TABLE, ['status' => $status, 'updated_at' => Clock::sql(Clock::now())] + $values, [
+            'operation_id' => $operationId,
+        ]);
     }
 
     /**
@@ -189,7 +233,32 @@ final class ExternalOperations
     }
 
     /**
-     * Operations whose outcome nobody knows yet, oldest first.
+     * Ask again later, and keep asking — never give up into "failed".
+     *
+     * For an owner that can answer the question (Calendar v1's source_ref
+     * lookup), an unknown stays unknown until it answers: the contract (§12.4)
+     * is that a lookup that keeps failing is "pending verification", shown as
+     * such, with backoff — not an outcome somebody has to guess at.
+     */
+    public static function retryLater(int $operationId, int $attempts, ?string $errorMessage = null): void
+    {
+        $minutes = min(240, 2 ** max(1, min(8, $attempts)));
+
+        $values = [
+            'attempts'      => $attempts,
+            'next_check_at' => Clock::sql(Clock::now()->modify('+' . $minutes . ' minutes')),
+            'updated_at'    => Clock::sql(Clock::now()),
+        ];
+        if ($errorMessage !== null) {
+            $values['error_message'] = mb_substr($errorMessage, 0, 300);
+        }
+
+        Db::update(self::TABLE, $values, ['operation_id' => $operationId]);
+    }
+
+    /**
+     * Operations whose outcome nobody knows yet, and attempts waiting to be
+     * sent again, oldest first.
      *
      * @return list<array<string, mixed>>
      */
@@ -197,11 +266,11 @@ final class ExternalOperations
     {
         return Db::all(
             'SELECT * FROM ' . self::TABLE . '
-              WHERE status IN (:unknown, :pending)
+              WHERE status IN (:unknown, :pending, :deferred)
                 AND (next_check_at IS NULL OR next_check_at <= NOW())
               ORDER BY created_at
               LIMIT ' . max(1, min(200, $limit)),
-            ['unknown' => self::UNKNOWN, 'pending' => self::PENDING],
+            ['unknown' => self::UNKNOWN, 'pending' => self::PENDING, 'deferred' => self::DEFERRED],
         );
     }
 
@@ -256,6 +325,9 @@ final class ExternalOperations
                 self::FAILED    => (string) ($row['error_message'] ?? 'The other product declined this.'),
                 self::UNKNOWN   => 'Sent, but ' . ucfirst((string) $row['target_app'])
                                    . ' has not confirmed it. Checking — do not send it again.',
+                self::DEFERRED  => ucfirst((string) $row['target_app']) . ' has not accepted it yet ('
+                                   . (string) ($row['error_message'] ?? 'not ready') . '). Nothing was written there;'
+                                   . ' Voice will send the same request again.',
                 self::ABANDONED => 'Could not be confirmed with ' . ucfirst((string) $row['target_app'])
                                    . '. Check there before trying again.',
                 default         => 'In progress.',

@@ -185,13 +185,17 @@ export default function CommandCentre() {
                     detail={
                       workflow.status === 'not_configured'
                         ? workflow.reason ?? 'Not connected.'
-                        : `${workflow.confirmed ?? 0} confirmed in this period`
+                        : workflow.status === 'connected'
+                          ? `${workflow.confirmed ?? 0} confirmed in this period`
+                          : `${workflow.reason ?? 'Enabled, not verified.'} ${workflow.confirmed ?? 0} confirmed in this period.`
                     }
                     trailing={<StatusPill status={workflow.status} />}
                   />
                 ))}
                 <p className="vmuted vsmall" style={{ marginTop: 12, marginBottom: 0 }}>
-                  Counted only from outcomes acknowledged by the product that owns them.
+                  Counted only from outcomes acknowledged by the product that owns them. “Connected” means
+                  Integrations → Test all proved Voice’s key; a switched-on product nobody has tested is
+                  “Enabled, not verified”.
                 </p>
               </Card>
             </div>
