@@ -163,6 +163,7 @@ final class Routes
         // -------------------------------------------------------------------
         // Real-time
         // -------------------------------------------------------------------
+        $router->post('/v1/events/ticket', [EventsController::class, 'ticket']);
         $router->get('/v1/events', [EventsController::class, 'stream']);
     }
 }

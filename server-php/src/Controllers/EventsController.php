@@ -51,6 +51,20 @@ final class EventsController extends Controller
     /** How often permissions are rechecked mid-stream. */
     private const REVALIDATE_EVERY = 10;
 
+    /**
+     * A single-use, 30-second ticket to open the stream with.
+     *
+     * EventSource cannot send an Authorization header, so the stream URL
+     * carries this instead of the session key (G18#14). Asked for with the
+     * session in the header, like every other request.
+     */
+    public static function ticket(): never
+    {
+        [$auth, $ctx] = self::enter('voice.dashboard.view');
+
+        Http::data(\Aicountly\Api\StreamTickets::issue($ctx, $auth));
+    }
+
     public static function stream(): never
     {
         [$auth, $ctx] = self::enter('voice.dashboard.view');

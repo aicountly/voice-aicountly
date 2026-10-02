@@ -1878,4 +1878,59 @@ T::group('32. Service keys: route allow-list, company, actor and environment bin
     Auth::adopt($owner);
 }
 
+// ===========================================================================
+T::group('33. The live stream takes a single-use ticket, never the session key (G18#14, G18#24)');
+// ===========================================================================
+{
+    Context::resetForTesting();
+    Context::trustForTesting(CMP, $owner, true);
+    Auth::adopt($owner);
+    clearHeaders();
+    $minted = request('POST', '/v1/events/ticket', ['cmp_id' => (string) CMP]);
+    $ticket = (string) ($minted['body']['data']['ticket'] ?? '');
+    T::ok($minted['status'] === 200 && strlen($ticket) >= 40, 'an authenticated POST mints a ticket');
+    T::same(30, $minted['body']['data']['expires_in'] ?? null, 'that lives 30 seconds');
+    T::same(0, (int) Db::scalar('SELECT COUNT(*) FROM voice_stream_tickets WHERE ticket_hash = :t', ['t' => $ticket]), 'only its hash is stored');
+
+    Auth::adopt(null);
+    $_SERVER['REQUEST_URI'] = '/api/v1/events';
+    $_GET = ['ticket' => $ticket, 'cmp_id' => (string) CMP];
+    $streamAuth = Auth::resolve();
+    T::ok($streamAuth !== null && $streamAuth->uuid === USER, 'the stream resolves the user from the ticket');
+    T::same('', $streamAuth?->sesKey(), 'and holds no session key, so it cannot reach another product');
+    $_GET = ['ticket' => $ticket];
+    T::same(null, Auth::resolve(), 'the same ticket a second time is refused');
+
+    $other = request('POST', '/v1/events/ticket', ['cmp_id' => (string) CMP], [], []);
+    Auth::adopt($owner);
+    $other = request('POST', '/v1/events/ticket', ['cmp_id' => (string) CMP]);
+    Auth::adopt(null);
+    $_SERVER['REQUEST_URI'] = '/api/v1/events';
+    $_GET = ['ticket' => (string) ($other['body']['data']['ticket'] ?? '')];
+    $bound = Auth::resolve();
+    $refusal = null;
+    try {
+        Context::forCompany(OTHER_CMP)->assertAllowed($bound);
+    } catch (\Aicountly\Api\ResponseSent $sent) {
+        $refusal = $sent->status;
+    }
+    T::same(403, $refusal, 'a ticket opens the stream for its own company only');
+
+    Db::run("UPDATE voice_stream_tickets SET expires_at = NOW() - INTERVAL '1 second' WHERE used_at IS NULL");
+    Auth::adopt($owner);
+    $late = request('POST', '/v1/events/ticket', ['cmp_id' => (string) CMP]);
+    Db::run("UPDATE voice_stream_tickets SET expires_at = NOW() - INTERVAL '1 second' WHERE used_at IS NULL");
+    Auth::adopt(null);
+    $_GET = ['ticket' => (string) ($late['body']['data']['ticket'] ?? '')];
+    T::same(null, Auth::resolve(), 'an expired ticket is refused');
+
+    $_GET = ['access_token' => 'test-ses-key-' . USER];
+    T::same(null, Auth::resolve(), 'a session key in the stream URL no longer authenticates anything');
+
+    $_GET = [];
+    Auth::adopt($owner);
+    $source = (string) file_get_contents(dirname(__DIR__, 2) . '/web/src/services/api.ts');
+    T::ok(!str_contains($source, "'access_token'"), 'and the SPA no longer puts the session key in the stream URL');
+}
+
 exit(T::summary());

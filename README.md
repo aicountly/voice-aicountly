@@ -305,10 +305,10 @@ the app exchanges it for a short-lived `ses_key`. A user already signed in to
 another AICOUNTLY product lands straight on the dashboard.
 
 The `ses_key` lives in memory only and never reaches localStorage — that split is
-the whole point of the two-token model. The one exception is the SSE stream,
-where the browser's `EventSource` cannot set headers; the key travels as a query
-parameter on that route alone, same-origin, and the reasoning is written at
-`src/Auth.php`.
+the whole point of the two-token model — and it never travels in a URL. The SSE
+stream, whose `EventSource` cannot set headers, is opened with a single-use,
+30-second ticket minted by `POST /v1/events/ticket` (session in the header) and
+bound to the user and company; see `src/StreamTickets.php`.
 
 See [docs/auth/AICOUNTLY_AUTH_WORKFLOW.md](docs/auth/AICOUNTLY_AUTH_WORKFLOW.md).
 

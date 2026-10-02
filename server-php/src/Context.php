@@ -92,6 +92,17 @@ final class Context
             return;
         }
 
+        // A stream opened with a ticket: Manage was asked when the ticket was
+        // issued (seconds ago); the ticket is good for that company only.
+        if ($auth->streamCompany !== null) {
+            if ($auth->streamCompany !== $this->cmpId) {
+                Http::forbidden('This stream ticket was issued for another company.');
+            }
+            self::$verified[$this->cmpId . ':' . $auth->fingerprint()] = ['owner' => $auth->streamOwner];
+
+            return;
+        }
+
         // A person — directly, or through a product that forwarded their own
         // session — is checked with Manage, with that session.
         $key = $this->cmpId . ':' . $auth->fingerprint();

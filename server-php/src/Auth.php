@@ -44,6 +44,10 @@ final class Auth
         // A service call naming a person by X-Actor-Uuid without their session:
         // recorded for the audit trail, never acted on (ServicePolicy).
         public readonly ?string $claimedActor = null,
+        // Set only for the live stream opened with a ticket: the company the
+        // ticket was issued for, and Manage's ownership verdict at that moment.
+        public readonly ?int $streamCompany = null,
+        public readonly bool $streamOwner = false,
     ) {
     }
 
@@ -99,6 +103,18 @@ final class Auth
         $serviceKey = Http::header('X-Service-Key');
         if ($serviceKey !== '') {
             return self::resolveService($serviceKey);
+        }
+
+        // The live stream authenticates with a single-use ticket, never with
+        // a session key in its URL (see StreamTickets).
+        $ticket = self::streamTicket();
+        if ($ticket !== '') {
+            $row = StreamTickets::redeem($ticket);
+
+            return $row === null ? null : new self(
+                (string) $row['user_uuid'], 'user', Env::get('APP_PRODUCT_KEY', 'voice'), '', null, null,
+                (int) $row['cmp_id'], (bool) $row['is_owner'],
+            );
         }
 
         $sesKey = self::bearer();
@@ -230,31 +246,27 @@ final class Auth
     }
 
     /**
-     * The session key from the request.
+     * The stream ticket, on the one route that takes it (/v1/events).
      *
-     * Normally the Authorization header. The one exception is the EventSource
-     * stream: the browser's EventSource cannot set headers at all, so the key
-     * may also arrive as `access_token` on that ONE route.
-     *
-     * That is a real widening and it is bounded deliberately:
-     *   - only /v1/events accepts it, checked against the request path here;
-     *   - the request is same-origin, so the key does not cross a domain;
-     *   - the server never logs the query string (see Clients\ApiClient::log).
-     *
-     * Allowing it everywhere would put session keys in access logs, in
-     * `Referer` headers and in browser history for every request this product
-     * makes, which is exactly why it is not allowed everywhere.
+     * The browser's EventSource cannot set headers. It used to carry the
+     * ses_key in the URL instead — a bearer for every product, in access logs
+     * and history. Now the URL carries a 30-second, single-use ticket bound to
+     * this user, company and route, minted over an authenticated POST.
      */
-    private static function bearer(): string
+    private static function streamTicket(): string
     {
         $path = (string) (parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH) ?: '');
-        if (str_ends_with(rtrim($path, '/'), '/v1/events')) {
-            $fromQuery = $_GET['access_token'] ?? '';
-            if (is_string($fromQuery) && $fromQuery !== '') {
-                return trim($fromQuery);
-            }
+        if (!str_ends_with(rtrim($path, '/'), '/v1/events')) {
+            return '';
         }
+        $ticket = $_GET['ticket'] ?? '';
 
+        return is_string($ticket) ? trim($ticket) : '';
+    }
+
+    /** The session key from the Authorization header — never from a URL. */
+    private static function bearer(): string
+    {
         $header = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
         if (!is_string($header) || $header === '') {
             if (function_exists('apache_request_headers')) {
