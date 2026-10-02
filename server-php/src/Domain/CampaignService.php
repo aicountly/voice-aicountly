@@ -264,8 +264,22 @@ final class CampaignService
             return ['ok' => false, 'e164' => null, 'reason' => 'no_reference'];
         }
 
+        if ($source === 'contacts') {
+            // A COMPANY contact, read from Contacts' company endpoint, merges
+            // followed; phones read from phones[{value}] (G18#2, G18#3).
+            $result = (new ContactsClient())->withSession($auth->sesKey())
+                ->contact($ctx->cmpId, $externalRef, CallingPolicy::regionFor($ctx));
+            if (!$result['ok']) {
+                return ['ok' => false, 'e164' => null, 'reason' => 'owner_unavailable'];
+            }
+            $e164 = ContactsClient::dialable($result['data']);
+
+            return $e164 === null
+                ? ['ok' => false, 'e164' => null, 'reason' => 'no_number']
+                : ['ok' => true, 'e164' => $e164, 'reason' => null];
+        }
+
         $result = match ($source) {
-            'contacts' => (new ContactsClient())->withSession($auth->sesKey())->contact($externalRef),
             'crm'      => (new CrmClient())->withSession($auth->sesKey())->lead($externalRef),
             default    => ['ok' => false, 'status' => 0, 'body' => null, 'error' => 'unsupported_source'],
         };

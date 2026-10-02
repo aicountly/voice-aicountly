@@ -153,7 +153,7 @@ final class CampaignsController extends Controller
      */
     public static function audience(string $id): never
     {
-        [, $ctx] = self::enter('voice.campaigns.manage');
+        [$auth, $ctx] = self::enter('voice.campaigns.manage');
         $campaignId = self::id($id);
 
         if (CampaignService::row($ctx, $campaignId) === null) {
@@ -174,6 +174,43 @@ final class CampaignsController extends Controller
         }
         if ($source !== 'filter' && $refs === []) {
             Http::validationFailed('Select at least one audience member.');
+        }
+
+        // Contacts refs must be COMPANY contacts this person can read in this
+        // company — not somebody's private address book (G18#3). Checked now,
+        // under the builder's own session; an outage stores nothing unverified.
+        if ($source === 'contacts') {
+            $clean = array_values(array_unique(array_filter(array_map(
+                static fn ($ref): string => is_scalar($ref) ? trim((string) $ref) : '',
+                $refs,
+            ))));
+            if (count($clean) > 100) {
+                Http::validationFailed('At most 100 contacts per audience update.');
+            }
+            $resolved = (new \Aicountly\Api\Clients\ContactsClient())->withSession($auth->sesKey())->resolveMany($ctx->cmpId, $clean);
+            if (!$resolved['ok']) {
+                $resolved['kind'] === 'forbidden'
+                    ? Http::forbidden('You cannot read this company’s contacts in Aicountly Contacts.')
+                    : self::fail('owner_unavailable', 'Aicountly Contacts could not confirm these contacts, so the audience was not changed.');
+            }
+            $usable = [];
+            $refused = [];
+            foreach ($resolved['data'] as $row) {
+                $target = $row['state'] === 'merged' && $row['survivorId'] !== null ? $row['survivorId'] : $row['id'];
+                if ($row['readable'] && in_array($row['state'], ['active', 'merged'], true)) {
+                    $usable[$target] = $target;
+                } else {
+                    $refused[] = $row['id'];
+                }
+            }
+            $refused = array_values(array_unique(array_merge($refused, array_diff($clean, array_column($resolved['data'], 'id')))));
+            if ($refused !== []) {
+                Http::validationFailed(
+                    'Some contacts are not active company contacts you can read here, so they cannot be called for this company.',
+                    ['refused' => $refused],
+                );
+            }
+            $refs = array_values($usable);
         }
 
         $inserted = Db::transaction(static function () use ($ctx, $campaignId, $source, $refs, $filter): int {

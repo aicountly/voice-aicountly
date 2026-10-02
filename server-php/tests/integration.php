@@ -1566,4 +1566,64 @@ T::group('28. Company owner comes from Manage companyinfo, not acs_type (I-18, G
     Auth::adopt($owner);
 }
 
+// ===========================================================================
+T::group('29. Contacts: canonical shape, company endpoints, matchCount (G18#2, G18#3, G18#7)');
+// ===========================================================================
+{
+    stubReset();
+    Context::resetForTesting();
+    Context::trustForTesting(CMP, $owner, true);
+    Auth::adopt($owner);
+
+    $search = request('GET', '/v1/contacts', ['cmp_id' => (string) CMP, 'q' => 'stub']);
+    T::same(200, $search['status'], 'a directory search answers');
+    T::same('Stub One', $search['body']['data'][0]['display_name'] ?? null, 'the name comes from displayName, not a guessed name field');
+    T::same('+919876500011', $search['body']['data'][0]['phones'][0]['e164'] ?? null, 'the number comes from phones[{value}]');
+    T::same('company', $search['body']['meta']['scope'] ?? null, 'and the company directory was asked, not a personal book');
+
+    $one = request('GET', '/v1/contacts', ['cmp_id' => (string) CMP, 'phone' => '98765 00011']);
+    T::same(1, $one['body']['meta']['matchCount'] ?? null, 'a national number finds the +91 contact (matchCount 1)');
+    T::same(true, $one['body']['meta']['attributable'] ?? null, 'and exactly one match holding that number is attributable');
+    $two = request('GET', '/v1/contacts', ['cmp_id' => (string) CMP, 'phone' => '+919876500099']);
+    T::same(2, $two['body']['meta']['matchCount'] ?? null, 'a shared number reports two matches');
+    T::same(false, $two['body']['meta']['attributable'] ?? null, 'and is NOT attributable');
+    $none = request('GET', '/v1/contacts', ['cmp_id' => (string) CMP, 'phone' => '+919876500055']);
+    T::same(0, $none['body']['meta']['matchCount'] ?? null, 'an unknown number matches nobody');
+    T::same([], $none['body']['data'] ?? null, 'and returns no contact at all');
+
+    $merged = request('GET', '/v1/contacts/merged-old', ['cmp_id' => (string) CMP]);
+    T::same('stub-1', $merged['body']['data']['contact']['id'] ?? null, 'a merged id is followed to its survivor');
+    T::same('merged-old', $merged['body']['meta']['resolved_from'] ?? null, 'and says it was');
+    $gone = request('GET', '/v1/contacts/gone', ['cmp_id' => (string) CMP]);
+    T::same(404, $gone['status'], 'a deleted contact is 404, not an outage');
+
+    $created = request('POST', '/v1/contacts', ['cmp_id' => (string) CMP], ['name' => 'Priya Sharma', 'phone' => '98765 43210', 'ecosystemRoles' => ['lead']]);
+    T::same(201, $created['status'], 'a contact is created in Contacts');
+    T::same('Priya Sharma', $created['body']['data']['display_name'] ?? null, 'sent as displayName');
+    T::same('+919876543210', $created['body']['data']['phones'][0]['e164'] ?? null, 'with the number in E.164');
+    $empty = request('POST', '/v1/contacts', ['cmp_id' => (string) CMP], []);
+    T::same(422, $empty['status'], 'an empty create is refused here, not passed through');
+
+    $ctx29 = scope(CMP, $owner);
+    T::same('+919876500012', CampaignService::resolveNumber($ctx29, $owner, ['source' => 'contacts', 'external_ref' => 'national'])['e164'],
+        'a campaign reads a nationally stored phone as the company-region E.164');
+    T::same('no_number', CampaignService::resolveNumber($ctx29, $owner, ['source' => 'contacts', 'external_ref' => 'missing'])['reason'],
+        'a contact with no phone is no_number');
+
+    $campaign29 = (int) Db::insert('voice_campaigns', [
+        'cmp_id' => CMP, 'name' => 'Audience check', 'mode' => 'agent', 'status' => 'draft',
+        'script' => ['body' => 'Hello', 'reviewed' => true, 'audience_purpose' => 'Requested callback'],
+    ], 'campaign_id');
+    $refused = request('POST', '/v1/campaigns/' . $campaign29 . '/audience', ['cmp_id' => (string) CMP], ['source' => 'contacts', 'refs' => ['stub-5', 'private-7']]);
+    T::same(422, $refused['status'], 'a personal (non-company) contact id is refused as a campaign audience');
+    T::same(['private-7'], $refused['body']['error']['details']['refused'] ?? null, 'naming the refused id');
+    $accepted = request('POST', '/v1/campaigns/' . $campaign29 . '/audience', ['cmp_id' => (string) CMP], ['source' => 'contacts', 'refs' => ['stub-5']]);
+    T::same(200, $accepted['status'], 'a company contact is accepted');
+
+    stubMode('contacts', 'down');
+    $down = request('GET', '/v1/contacts/stub-1', ['cmp_id' => (string) CMP]);
+    T::same(503, $down['status'], 'Contacts down is 503 retryable, not 404');
+    stubReset();
+}
+
 exit(T::summary());
