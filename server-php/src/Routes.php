@@ -155,6 +155,9 @@ final class Routes
         $router->post('/v1/suppressions', [WorkspaceController::class, 'suppress']);
         $router->get('/v1/audit', [WorkspaceController::class, 'audit']);
         $router->get('/v1/access', [WorkspaceController::class, 'access']);
+        $router->post('/v1/access/profiles', [WorkspaceController::class, 'saveProfile']);
+        $router->post('/v1/access/assignments', [WorkspaceController::class, 'assignProfile']);
+        $router->delete('/v1/access/assignments', [WorkspaceController::class, 'revokeProfile']);
 
         // -------------------------------------------------------------------
         // Real-time

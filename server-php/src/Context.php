@@ -31,7 +31,11 @@ use Aicountly\Api\Clients\ManageClient;
  */
 final class Context
 {
-    /** @var array<string, bool> */
+    /**
+     * Manage's verdict per company and session, for this request.
+     *
+     * @var array<string, array{owner: bool}>
+     */
     private static array $verified = [];
 
     private function __construct(
@@ -61,12 +65,19 @@ final class Context
     }
 
     /**
-     * Confirm this session may open this company, per Manage.
+     * Confirm this session may open this company, per Manage — and learn
+     * whether it OWNS the company, from the same answer.
      *
      * Memoised per request because it runs on every scoped endpoint; a failure
      * to reach Manage is a 503 and not an allow, because the alternative is
      * serving one tenant's call recordings to another whenever Manage has a bad
      * minute.
+     *
+     * Manage's companyinfo is asked with the caller's OWN ses_key and read by
+     * ManageCompanyAnswer: 401/403/404 → 403, no answer or 5xx or an
+     * unreadable answer → 503. Ownership comes from that answer's flags
+     * (ownership / is_creator / access_type), never from validatesession —
+     * which has no such field — and never from the request (I-18).
      */
     public function assertAllowed(Auth $auth): void
     {
@@ -82,40 +93,52 @@ final class Context
         }
 
         $result = (new ManageClient())->withSession($auth->sesKey())->companyInfo($this->cmpId);
+        $answer = ManageCompanyAnswer::interpret(
+            (int) $result['status'],
+            is_array($result['body'] ?? null) ? $result['body'] : null,
+            $this->cmpId,
+        );
 
         // Manage answering "no" and Manage not answering are different facts
         // and must produce different answers. A definitive refusal is a 403 the
         // user can act on; an unreachable Manage is a 503 they should retry.
         // Collapsing them tells somebody to try again at a door that will never
         // open, and hides a genuine outage behind a permissions message.
-        if (!$result['ok'] && in_array($result['status'], [401, 403, 404], true)) {
+        if ($answer['outcome'] === ManageCompanyAnswer::DENIED) {
             Http::forbidden('You do not have access to this company.');
         }
 
-        if (!$result['ok']) {
+        if ($answer['outcome'] !== ManageCompanyAnswer::ALLOWED) {
             // Unreachable is not "allowed". A tenant check that fails open is
             // not a tenant check.
-            Http::error(503, 'context_unavailable', 'Cannot confirm company access right now. Please retry.');
+            Http::error(503, 'context_unavailable', 'Cannot confirm company access right now. Please retry.', ['retryable' => true]);
         }
 
-        $body = $result['body'] ?? [];
-        $company = $body['data'] ?? $body['company'] ?? $body;
-        $resolved = (int) ($company['cmp_id'] ?? $company['comp_id'] ?? $company['id'] ?? 0);
+        self::$verified[$key] = ['owner' => $answer['isOwner']];
+    }
 
-        if ($resolved !== $this->cmpId) {
-            Http::forbidden('You do not have access to this company.');
+    /**
+     * Does Manage say this caller owns this company?
+     *
+     * Only after assertAllowed() has asked; false otherwise, and always false
+     * for a service caller — a product key is never a company owner.
+     */
+    public function isOwner(Auth $auth): bool
+    {
+        if ($auth->isService()) {
+            return false;
         }
 
-        self::$verified[$key] = true;
+        return (self::$verified[$this->cmpId . ':' . $auth->fingerprint()]['owner'] ?? false) === true;
     }
 
     /** CLI only — the test suite stands in for Manage rather than reaching it. */
-    public static function trustForTesting(int $cmpId, Auth $auth): void
+    public static function trustForTesting(int $cmpId, Auth $auth, bool $owner = false): void
     {
         if (PHP_SAPI !== 'cli') {
             return;
         }
-        self::$verified[$cmpId . ':' . $auth->fingerprint()] = true;
+        self::$verified[$cmpId . ':' . $auth->fingerprint()] = ['owner' => $owner];
     }
 
     /** CLI only — forget every memoised verdict, so one test cannot vouch for the next. */

@@ -156,9 +156,29 @@ function clearHeaders(): void
 function scope(int $cmpId, Auth $auth, int $boId = 0): Context
 {
     $ctx = Context::forCompany($cmpId, $boId);
-    Context::trustForTesting($cmpId, $auth);
+    Context::trustForTesting($cmpId, $auth, isTestOwner($auth));
 
     return $ctx;
+}
+
+/**
+ * Identities that stand in for a company OWNER. Ownership is Manage's answer
+ * (Context::isOwner), so a test that trusts a scope says which answer it means.
+ *
+ * @var array<string, bool>
+ */
+$GLOBALS['voice_test_owners'] = [];
+
+function markOwner(Auth $auth): Auth
+{
+    $GLOBALS['voice_test_owners'][$auth->fingerprint()] = true;
+
+    return $auth;
+}
+
+function isTestOwner(Auth $auth): bool
+{
+    return isset($GLOBALS['voice_test_owners'][$auth->fingerprint()]);
 }
 
 /** Every Voice table emptied, so each run starts from the same place. */
@@ -245,7 +265,7 @@ function seedSettings(int $cmpId, array $overrides = []): void
 /**
  * Grant a profile holding exactly these permissions.
  *
- * Used for the permission tests, where acs_type must NOT be 1 — an owner holds
+ * Used for the permission tests, where the caller must NOT be the owner — an owner holds
  * everything and would pass every check without proving anything.
  */
 function grant(int $cmpId, string $userUuid, array $permissions): void

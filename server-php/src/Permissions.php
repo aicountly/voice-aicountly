@@ -94,9 +94,9 @@ final class Permissions
      *
      * Without this, the first person into a brand-new company sees a working
      * sign-in and a wall of refusals, which reads as a broken product rather
-     * than as an administrative step nobody has taken yet. The owner (portal
-     * acs_type 1) holds everything regardless; this is for everybody else on
-     * day one.
+     * than as an administrative step nobody has taken yet. The company owner
+     * (per Manage's companyinfo — see Context::isOwner) holds everything
+     * regardless; this is for everybody else on day one.
      *
      * It deliberately grants no recording access, no campaign launch and no
      * supervisor monitoring. Those three are the ones that are expensive or
@@ -128,7 +128,7 @@ final class Permissions
         if ($auth->isService()) {
             return true;
         }
-        if ($auth->accessType() === 1) {
+        if ($ctx->isOwner($auth)) {
             return true;
         }
 
@@ -143,7 +143,7 @@ final class Permissions
             return self::$cache[$key];
         }
 
-        if ($auth->isService() || $auth->accessType() === 1) {
+        if ($auth->isService() || $ctx->isOwner($auth)) {
             return self::$cache[$key] = self::all();
         }
 
@@ -210,7 +210,7 @@ final class Permissions
      */
     public static function grantable(Context $ctx, Auth $auth): array
     {
-        if ($auth->isService() || $auth->accessType() === 1) {
+        if ($auth->isService() || $ctx->isOwner($auth)) {
             return self::all();
         }
 

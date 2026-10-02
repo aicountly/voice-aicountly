@@ -54,7 +54,7 @@ const OTHER_USER = 'user-bbb';
 truncateAll();
 stubReset();
 
-$owner = Auth::forTesting(USER, 'user', 'voice', ['acs_type' => 1]);
+$owner = markOwner(Auth::forTesting(USER));
 $member = Auth::forTesting(OTHER_USER, 'user', 'voice', []);
 
 echo "Voice integration tests\n" . str_repeat('=', 62) . "\n";
@@ -107,8 +107,8 @@ T::group('1. Tenant isolation');
     $forbidden = request('GET', '/v1/calls', ['cmp_id' => '999']);
     T::same(403, $forbidden['status'], 'a company Manage refuses is 403, not an empty list');
     Context::resetForTesting();
-    Context::trustForTesting(CMP, $owner);
-    Context::trustForTesting(OTHER_CMP, $owner);
+    Context::trustForTesting(CMP, $owner, true);
+    Context::trustForTesting(OTHER_CMP, $owner, true);
 }
 
 // ===========================================================================
@@ -361,7 +361,7 @@ T::group('8. Provider capability restrictions');
 
     // A company with no connection can do nothing, and says so clearly.
     $emptyCtx = Context::forCompany(4999);
-    Context::trustForTesting(4999, $owner);
+    Context::trustForTesting(4999, $owner, true);
     // A wide-open window, so this checks the provider refusal and not the
     // time of day the suite happens to run at.
     seedSettings(4999);
@@ -980,7 +980,7 @@ T::group('21. Company switch clears prior tenant data');
     Permissions::forget();
 
     $ctxA = Context::forCompany(CMP);
-    Context::trustForTesting(CMP, $owner);
+    Context::trustForTesting(CMP, $owner, true);
     $permissionsA = Permissions::granted($ctxA, $owner);
 
     $ctxB = Context::forCompany(OTHER_CMP);
@@ -1003,8 +1003,8 @@ T::group('21. Company switch clears prior tenant data');
     }
     T::ok($refused, 'switching to a company the session may not open is refused, not silently empty');
 
-    Context::trustForTesting(CMP, $owner);
-    Context::trustForTesting(OTHER_CMP, $owner);
+    Context::trustForTesting(CMP, $owner, true);
+    Context::trustForTesting(OTHER_CMP, $owner, true);
 }
 
 // ===========================================================================
@@ -1186,7 +1186,7 @@ T::group('25. AI runs through AI Pulse');
     $call = $sent[0] ?? ['method' => '', 'url' => '', 'headers' => [], 'body' => []];
     T::same('POST https://pulse.test/api/ai/v1/generate', $call['method'] . ' ' . $call['url'], 'to POST /api/ai/v1/generate');
     T::same('voice', $call['headers']['x-pulse-product'] ?? null, 'as product "voice"');
-    T::same('Bearer test-ses-key', $call['headers']['authorization'] ?? null, 'with the signed-in user’s own session');
+    T::same('Bearer test-ses-key-' . USER, $call['headers']['authorization'] ?? null, 'with the signed-in user’s own session');
     T::ok(!isset($call['headers']['x-pulse-service-key']), 'and no service key when a user is behind the call');
     T::same(
         ['call.summary', 'economy', 300],
@@ -1301,7 +1301,7 @@ T::group('25. AI runs through AI Pulse');
         'the Studio reports AI through AI Pulse, from Pulse’s own status');
     T::same('GET https://pulse.test/api/ai/v1/status', ($sent[0]['method'] ?? '') . ' ' . ($sent[0]['url'] ?? ''),
         'asked at GET /api/ai/v1/status');
-    T::same('Bearer test-ses-key', $sent[0]['headers']['authorization'] ?? null, 'with the viewer’s own session');
+    T::same('Bearer test-ses-key-' . USER, $sent[0]['headers']['authorization'] ?? null, 'with the viewer’s own session');
     T::ok(!array_key_exists('model', $ai) && !array_key_exists('provider', $ai), 'and it names no model or provider for Voice to choose');
 
     $replies = [$pulseStatus(false)];
@@ -1468,7 +1468,7 @@ T::group('27. Numbers become E.164 with a region, never by prefixing + (G18#6)')
 
     // Suppression typed nationally protects the number a campaign dials.
     Auth::adopt($owner);
-    Context::trustForTesting(CMP, $owner);
+    Context::trustForTesting(CMP, $owner, true);
     $suppressed = request('POST', '/v1/suppressions', ['cmp_id' => (string) CMP], ['e164' => '98765 00077', 'reason' => 'opt_out']);
     T::same(200, $suppressed['status'], 'a suppression can be entered without a country code');
     T::ok(CallingPolicy::isSuppressed($ctx, '+919876500077'), 'and it suppresses the E.164 number');
@@ -1488,6 +1488,82 @@ T::group('27. Numbers become E.164 with a region, never by prefixing + (G18#6)')
     $call = CallService::place($ctx, $owner, ['to' => '98765 00088']);
     T::ok($call['ok'], 'a call to a national number is placed');
     T::same('+919876500088', $call['call']['remote_e164'] ?? null, 'to +91, the company region');
+}
+
+// ===========================================================================
+T::group('28. Company owner comes from Manage companyinfo, not acs_type (I-18, G18#5)');
+// ===========================================================================
+{
+    $a = static fn (int $status, ?array $json, int $cmp) => \Aicountly\Api\ManageCompanyAnswer::interpret($status, $json, $cmp);
+    T::same('allowed', $a(200, ['success' => '1', 'data' => ['comp_id' => 5, 'ownership' => 'owner']], 5)['outcome'], 'a 2xx about this company is membership');
+    T::ok($a(200, ['success' => '1', 'data' => ['comp_id' => 5, 'ownership' => 'owner']], 5)['isOwner'], 'ownership "owner" is owner');
+    T::ok($a(200, ['data' => ['cmp_id' => 5, 'is_creator' => true]], 5)['isOwner'], 'is_creator true is owner');
+    T::ok($a(200, ['data' => ['cmp_id' => 5, 'access_type' => 1]], 5)['isOwner'], 'access_type 1 is owner');
+    T::ok(!$a(200, ['data' => ['cmp_id' => 5, 'ownership' => 'shared', 'access_type' => 2]], 5)['isOwner'], 'a shared member is not');
+    T::same('denied', $a(404, ['success' => false], 5)['outcome'], '404 is denied');
+    T::same('denied', $a(401, null, 5)['outcome'], '401 is denied');
+    T::same('unavailable', $a(0, null, 5)['outcome'], 'no answer is unavailable');
+    T::same('unavailable', $a(502, null, 5)['outcome'], '5xx is unavailable');
+    T::same('unavailable', $a(200, ['data' => ['comp_id' => 6]], 5)['outcome'], 'an answer about another company is never a yes');
+
+    // The real Context path, against the stub's Manage-shaped companyinfo.
+    $owner28 = Auth::forTesting(USER);            // the stub's owner token
+    $member28 = Auth::forTesting('user-ccc');      // a shared member, no assignment
+    $fresh = 4003;
+    Context::resetForTesting();
+    $conn28 = seedConnection($fresh);
+    seedNumber($fresh, $conn28, '+918066000003');
+    seedSettings($fresh);
+
+    Auth::adopt($owner28);
+    $access = request('GET', '/v1/access', ['cmp_id' => (string) $fresh]);
+    T::same(200, $access['status'], 'the owner opens Access in a fresh company');
+    T::same(true, $access['body']['data']['is_owner'] ?? null, 'and is the owner because Manage says so');
+    T::ok(in_array('voice.access.manage', $access['body']['data']['granted'] ?? [], true), 'holding voice.access.manage with no seeded rows');
+
+    $profile = request('POST', '/v1/access/profiles', ['cmp_id' => (string) $fresh], [
+        'name' => 'Agents', 'permissions' => ['voice.dashboard.view', 'voice.call.view', 'voice.call.place'],
+    ]);
+    T::same(201, $profile['status'], 'the owner creates the first profile');
+    $profileId = (int) ($profile['body']['data']['profile_id'] ?? 0);
+    $assign = request('POST', '/v1/access/assignments', ['cmp_id' => (string) $fresh], ['user_uuid' => 'user-ccc', 'profile_id' => $profileId]);
+    T::same(201, $assign['status'], 'and assigns it to a member');
+    $placed = request('POST', '/v1/calls', ['cmp_id' => (string) $fresh], ['to' => '+919876500091']);
+    T::ok(in_array($placed['status'], [200, 201, 202], true), 'the owner can place a call with no profile of their own');
+
+    Context::resetForTesting();
+    Auth::adopt($member28);
+    $memberAccess = request('GET', '/v1/access', ['cmp_id' => (string) $fresh]);
+    T::same(false, $memberAccess['body']['data']['is_owner'] ?? null, 'a member is not the owner');
+    T::ok(in_array('voice.call.place', $memberAccess['body']['data']['granted'] ?? [], true), 'and holds what the owner assigned');
+    $escalate = request('POST', '/v1/access/profiles', ['cmp_id' => (string) $fresh], ['name' => 'Mine', 'permissions' => ['voice.access.manage']]);
+    T::same(403, $escalate['status'], 'but cannot manage access');
+
+    $revoke = (static function () use ($owner28, $fresh, $profileId) {
+        Context::resetForTesting();
+        Auth::adopt($owner28);
+        $_GET = [];
+
+        return request('DELETE', '/v1/access/assignments', ['cmp_id' => (string) $fresh, 'user_uuid' => 'user-ccc', 'profile_id' => (string) $profileId]);
+    })();
+    T::same(200, $revoke['status'], 'the owner revokes it');
+    Context::resetForTesting();
+    Auth::adopt($member28);
+    $after = request('POST', '/v1/calls', ['cmp_id' => (string) $fresh], ['to' => '+919876500092']);
+    T::same(403, $after['status'], 'and the member can no longer place calls (day-one grants only)');
+
+    $denied = request('GET', '/v1/access', ['cmp_id' => '999']);
+    T::same(403, $denied['status'], 'Manage 404 for the company is a 403');
+    Context::resetForTesting();
+    $down = request('GET', '/v1/access', ['cmp_id' => '998']);
+    T::same(503, $down['status'], 'Manage failing is a 503, not a 403 and not an allow');
+    Context::resetForTesting();
+    $other = request('GET', '/v1/access', ['cmp_id' => '997']);
+    T::same(503, $other['status'], 'an answer about another company is a 503');
+
+    Context::resetForTesting();
+    Context::trustForTesting(CMP, $owner, true);
+    Auth::adopt($owner);
 }
 
 exit(T::summary());

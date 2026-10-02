@@ -71,7 +71,8 @@ final class Auth
             throw new \LogicException('Auth::forTesting is CLI only.');
         }
 
-        return new self($uuid, $kind, $sourceApp, $kind === 'user' ? 'test-ses-key' : '', $session);
+        // Per user, so a stand-in for Manage can tell an owner from a member.
+        return new self($uuid, $kind, $sourceApp, $kind === 'user' ? 'test-ses-key-' . $uuid : '', $session);
     }
 
     /** Resolve the caller, or answer 401 and stop. */
@@ -152,11 +153,9 @@ final class Auth
         return substr(hash('sha256', $this->kind . '|' . $this->uuid . '|' . $this->sesKey), 0, 32);
     }
 
-    /** Portal access type for the company when the portal reported one: 1 = owner. */
-    public function accessType(): ?int
-    {
-        return isset($this->session['acs_type']) ? (int) $this->session['acs_type'] : null;
-    }
+    // There is deliberately no accessType(). The portal's validatesession never
+    // returns `acs_type`; who owns a company is Manage's answer, read per
+    // company in Context::assertAllowed and asked through Context::isOwner().
 
     public function displayName(): string
     {

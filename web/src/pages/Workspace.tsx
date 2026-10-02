@@ -17,7 +17,7 @@ import { useApi, useMutation } from '../hooks/useApi'
 import { useUrlState } from '../hooks/useUrlState'
 import { api } from '../services/api'
 import type {
-  AgentSummary, AuditEvent, IntegrationStatus, ListResponse, Recording,
+  AccessInfo, AgentSummary, AuditEvent, IntegrationStatus, ListResponse, Recording,
   VoiceNumber, VoiceSettings,
 } from '../services/types'
 import { PageHeader } from '../shell/AppShell'
@@ -570,6 +570,140 @@ export function Settings() {
                 </Notice>
               )}
             </>
+          )
+        }}
+      </PanelState>
+    </>
+  )
+}
+
+/* ------------------------------------------------------------------- access */
+
+/**
+ * Who may do what in Voice, for this company.
+ *
+ * The company OWNER is whoever Manage says owns it (companyinfo, read with the
+ * signed-in session) and holds everything; everybody else holds the profiles
+ * assigned here, or the day-one defaults. Nobody can grant what they do not
+ * hold — the API refuses it, this screen only hides it.
+ */
+export function Access() {
+  const { company, branchId } = useVoice()
+  const [nonce, setNonce] = useState(0)
+  const state = useApi<{ data: AccessInfo }>(
+    (signal) => api.get('v1/access', undefined, signal),
+    [company?.cmp_id, branchId, nonce],
+  )
+  const [name, setName] = useState('')
+  const [picked, setPicked] = useState<string[]>([])
+  const [userId, setUserId] = useState('')
+  const [profileId, setProfileId] = useState('')
+  const refresh = useCallback(() => setNonce((n) => n + 1), [])
+
+  const create = useMutation((body: { name: string; permissions: string[] }) => api.post('v1/access/profiles', body))
+  const assign = useMutation((body: { user_uuid: string; profile_id: number }) => api.post('v1/access/assignments', body))
+  const revoke = useMutation((params: { user_uuid: string; profile_id: number }) => api.del('v1/access/assignments', params))
+
+  return (
+    <>
+      <PageHeader title="Access" subtitle="Voice permission profiles for this company." />
+      <PanelState state={state} what="access">
+        {(data) => {
+          const info = data.data
+          const manages = info.grantable.length > 0
+          return (
+            <div className="vstack">
+              <Card title="You">
+                <p style={{ margin: 0 }}>
+                  {info.is_owner
+                    ? 'Aicountly Manage says you own this company, so you hold every Voice permission.'
+                    : `You hold ${info.granted.length} Voice permission${info.granted.length === 1 ? '' : 's'} in this company.`}
+                </p>
+              </Card>
+
+              {manages ? (
+                <Card title="Profiles" subtitle="A profile can hold only permissions you hold yourself.">
+                  <div className="vstack vstack--tight">
+                    {info.profiles.length === 0 ? <p className="vmuted vsmall">No profiles yet.</p> : info.profiles.map((profile) => (
+                      <Row key={profile.profile_id} title={profile.name} detail={profile.permissions.join(', ') || 'No permissions'} />
+                    ))}
+                    <Field label="New profile name">
+                      <input value={name} onChange={(event) => setName(event.target.value)} />
+                    </Field>
+                    <div className="vstack vstack--tight">
+                      {info.grantable.map((permission) => (
+                        <label key={permission} className="vsplit" style={{ fontSize: 13 }}>
+                          <input
+                            type="checkbox"
+                            checked={picked.includes(permission)}
+                            onChange={(event) => setPicked(event.target.checked
+                              ? [...picked, permission]
+                              : picked.filter((p) => p !== permission))}
+                          />
+                          {permission}
+                        </label>
+                      ))}
+                    </div>
+                    {create.error ? <Notice tone="danger">{create.error.message}</Notice> : null}
+                    <Button
+                      variant="primary"
+                      disabled={name.trim() === '' || create.pending}
+                      onClick={() => void create.mutate({ name: name.trim(), permissions: picked }).then((ok) => {
+                        if (ok) { setName(''); setPicked([]); refresh() }
+                      })}
+                    >
+                      Create profile
+                    </Button>
+                  </div>
+                </Card>
+              ) : null}
+
+              {manages ? (
+                <Card title="Assignments" subtitle="By platform user id (the number Aicountly Manage shows for a member).">
+                  <div className="vstack vstack--tight">
+                    {(info.assignments ?? []).map((row) => (
+                      <Row
+                        key={`${row.user_uuid}-${row.profile_id}`}
+                        title={`User ${row.user_uuid}`}
+                        detail={info.profiles.find((p) => p.profile_id === row.profile_id)?.name ?? `Profile ${row.profile_id}`}
+                        trailing={(
+                          <Button
+                            variant="ghost"
+                            disabled={revoke.pending}
+                            onClick={() => void revoke.mutate({ user_uuid: row.user_uuid, profile_id: row.profile_id }).then((ok) => { if (ok) refresh() })}
+                          >
+                            Remove
+                          </Button>
+                        )}
+                      />
+                    ))}
+                    <Field label="Platform user id">
+                      <input value={userId} onChange={(event) => setUserId(event.target.value)} />
+                    </Field>
+                    <Field label="Profile">
+                      <select value={profileId} onChange={(event) => setProfileId(event.target.value)}>
+                        <option value="">Choose…</option>
+                        {info.profiles.map((profile) => (
+                          <option key={profile.profile_id} value={String(profile.profile_id)}>{profile.name}</option>
+                        ))}
+                      </select>
+                    </Field>
+                    {assign.error ? <Notice tone="danger">{assign.error.message}</Notice> : null}
+                    {revoke.error ? <Notice tone="danger">{revoke.error.message}</Notice> : null}
+                    <Button
+                      variant="primary"
+                      disabled={userId.trim() === '' || profileId === '' || assign.pending}
+                      onClick={() => void assign.mutate({ user_uuid: userId.trim(), profile_id: Number(profileId) }).then((ok) => {
+                        if (ok) { setUserId(''); refresh() }
+                      })}
+                    >
+                      Assign
+                    </Button>
+                  </div>
+                </Card>
+              ) : null}
+              <p className="vmuted vsmall">{info.note}</p>
+            </div>
           )
         }}
       </PanelState>

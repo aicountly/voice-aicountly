@@ -70,14 +70,10 @@ if ($path === 'seskey' || $path === 'seskey/refresh') {
 }
 
 if ($path === 'validatesession') {
-    stub_json(200, [
-        'status'      => 1,
-        'uuid_aictly' => 'stub-user-uuid',
-        'name'        => 'Demo Operator',
-        'email'       => 'demo@example.invalid',
-        // acs_type 1 is a company owner, so the walkthrough sees every screen.
-        'acs_type'    => 1,
-    ]);
+    // The REAL contract (my-aicountly-com AuthController::validateSession):
+    // status, an INTEGER uuid_aictly and the key — no name, no e-mail and no
+    // acs_type. Ownership is Manage's to say, in companyinfo below.
+    stub_json(200, ['status' => 1, 'uuid_aictly' => 101, 'ses_key' => 'stub-ses-key']);
 }
 
 if ($path === 'companies') {
@@ -88,18 +84,39 @@ if ($path === 'companies') {
 }
 
 // ---------------------------------------------------------------------------
-// Manage — the tenant check
+// Manage — the tenant check, in Manage's real companyinfo shape
+// (manage-aicountly CompanyModel::companyInfo; 404 for a non-member).
 // ---------------------------------------------------------------------------
 if (str_starts_with($path, 'companyinfo')) {
     $cmpId = (int) ($_GET['comp_id'] ?? 0);
+    $bearer = preg_match('/Bearer\s+(.+)/i', (string) ($_SERVER['HTTP_AUTHORIZATION'] ?? ''), $m) === 1 ? trim($m[1]) : '';
 
-    // Company 999 is the one this session may NOT open — that is what the
-    // tenant-isolation test uses.
+    // 999: this session may NOT open it — Manage says 404, "not found or access denied".
     if ($cmpId === 999) {
-        stub_json(403, ['message' => 'No access to that company.']);
+        stub_json(404, ['success' => false, 'message' => 'Company not found or access denied']);
+    }
+    // 998: Manage itself is failing.
+    if ($cmpId === 998) {
+        stub_json(502, ['message' => 'Bad gateway']);
+    }
+    // 997: an answer about a different company — never read as a yes.
+    if ($cmpId === 997) {
+        stub_json(200, ['success' => '1', 'data' => ['comp_id' => 1, 'cmp_id' => 1]]);
     }
 
-    stub_json(200, ['data' => ['cmp_id' => $cmpId, 'name' => 'Stub Company ' . $cmpId]]);
+    // The owner of every stub company is user-aaa (the suite's USER) and the
+    // walkthrough's portal user; everybody else is a shared member.
+    $owner = in_array($bearer, ['test-ses-key-user-aaa', 'stub-ses-key'], true);
+    stub_json(200, ['success' => '1', 'data' => [
+        'comp_id'     => $cmpId,
+        'cmp_id'      => $cmpId,
+        'comp_name'   => 'Stub Company ' . $cmpId,
+        'branch_list' => [],
+        'fy_list'     => [],
+        'is_creator'  => $owner,
+        'ownership'   => $owner ? 'owner' : 'shared',
+        'access_type' => $owner ? 1 : 2,
+    ]]);
 }
 
 // ---------------------------------------------------------------------------

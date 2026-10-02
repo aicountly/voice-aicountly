@@ -269,6 +269,9 @@ export const api = {
 
   put: <T>(path: string, body?: unknown, options?: Omit<RequestOptions, 'method' | 'body'>) =>
     send<T>(path, { ...options, method: 'PUT', body }),
+
+  del: <T>(path: string, params?: QueryParams) =>
+    send<T>(path, { method: 'DELETE', params }),
 }
 
 /** The SSE endpoint, with the scope and the session on the query string. */

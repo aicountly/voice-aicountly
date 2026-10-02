@@ -436,6 +436,10 @@ export interface AccessInfo {
   granted: string[]
   grantable: string[]
   profiles: Array<{ profile_id: number; name: string; description: string; permissions: string[]; is_active: boolean }>
+  /** Manage's answer for this company (companyinfo), never the portal session. */
+  is_owner?: boolean
+  owner_source?: string
+  assignments?: Array<{ profile_id: number; user_uuid: string; created_at: string; created_by: string | null }>
   note: string
 }
 
