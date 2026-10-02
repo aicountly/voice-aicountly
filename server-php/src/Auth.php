@@ -14,10 +14,11 @@ namespace Aicountly\Api;
  *     AS THAT USER. That is what makes their permissions apply over there
  *     instead of Voice re-implementing another product's access rules.
  *
- *  2. A trusted product backend — `X-Service-Key`, plus `X-Actor-Uuid` naming
- *     the human it is acting for. Lobby books a callback this way: the visitor
- *     at the desk has no session here, and the receptionist who typed it is not
- *     the agent whose queue it lands in.
+ *  2. A product backend — `X-Service-Key` + `X-AIC-Environment`, held to
+ *     ServicePolicy: only its listed routes and permissions, only companies its
+ *     acting person belongs to (their session forwarded as the Bearer, asked of
+ *     Manage) or that are explicitly bound to it. A bare `X-Actor-Uuid` is a
+ *     claim, recorded and never acted on. Lobby books a callback this way.
  *
  *  3. NOT a telephony provider. A carrier callback carries no AICOUNTLY
  *     identity and must never resolve to one — it is authenticated by the
@@ -40,6 +41,9 @@ final class Auth
         public readonly string $sourceApp,
         private readonly string $sesKey,
         private readonly ?array $session,
+        // A service call naming a person by X-Actor-Uuid without their session:
+        // recorded for the audit trail, never acted on (ServicePolicy).
+        public readonly ?string $claimedActor = null,
     ) {
     }
 
@@ -94,22 +98,7 @@ final class Auth
     {
         $serviceKey = Http::header('X-Service-Key');
         if ($serviceKey !== '') {
-            $app = ServiceKeys::resolveApp($serviceKey);
-            if ($app === null) {
-                return null;
-            }
-            // Proven by the key, not claimed in a header. Recording it is what
-            // stops us calling that product back inside its own request.
-            CrossServiceCallContext::adoptAuthenticatedOrigin($app);
-            $actor = Http::header('X-Actor-Uuid');
-
-            return new self(
-                $actor !== '' ? $actor : 'service:' . $app,
-                'service',
-                $app,
-                '',
-                null,
-            );
+            return self::resolveService($serviceKey);
         }
 
         $sesKey = self::bearer();
@@ -129,6 +118,54 @@ final class Auth
             $sesKey,
             $session,
         );
+    }
+
+    /**
+     * Another product's backend (ServicePolicy). The key proves WHICH product;
+     * the environment must be ours; a person is named only by their own
+     * session sent as the Bearer, which then also binds the company (Manage is
+     * asked with it). Without a session the product acts as itself, only on
+     * the routes and companies explicitly allowed to it.
+     */
+    private static function resolveService(string $serviceKey): ?self
+    {
+        $app = ServiceKeys::resolveApp($serviceKey);
+        if ($app === null) {
+            return null;
+        }
+        if (!ServicePolicy::environmentMatches(Http::header('X-AIC-Environment'))) {
+            Http::error(401, 'service_environment_mismatch',
+                'A service call must say which environment it is for (X-AIC-Environment), and it must be this one.');
+        }
+
+        // Proven by the key, not claimed in a header. Recording it is what
+        // stops us calling that product back inside its own request.
+        CrossServiceCallContext::adoptAuthenticatedOrigin($app);
+        $claimed = Http::header('X-Actor-Uuid');
+
+        $sesKey = self::bearer();
+        if ($sesKey === '') {
+            return new self('service:' . $app, 'service', $app, '', null, $claimed !== '' ? $claimed : null);
+        }
+
+        $session = Portal::validateSesKey($sesKey);
+        if ($session === null) {
+            return null;
+        }
+        $uuid = (string) ($session['uuid_aictly'] ?? $session['uuid'] ?? '');
+        if ($claimed !== '' && $claimed !== $uuid) {
+            Http::error(401, 'actor_mismatch', 'X-Actor-Uuid does not match the session sent with it.');
+        }
+
+        // The verified person, acting through the product: their session is
+        // kept so Manage decides whether they belong to the company.
+        return new self($uuid, 'service', $app, $sesKey, $session, null);
+    }
+
+    /** A service call that carries the acting person's own, validated session. */
+    public function hasVerifiedActor(): bool
+    {
+        return $this->isService() && $this->sesKey !== '';
     }
 
     public function isService(): bool

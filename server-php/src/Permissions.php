@@ -126,7 +126,8 @@ final class Permissions
     public static function allows(Context $ctx, Auth $auth, string $permission): bool
     {
         if ($auth->isService()) {
-            return true;
+            // Never blanket: only what this route grants this product.
+            return in_array($permission, ServicePolicy::grants($auth->sourceApp) ?? [], true);
         }
         if ($ctx->isOwner($auth)) {
             return true;
@@ -143,7 +144,10 @@ final class Permissions
             return self::$cache[$key];
         }
 
-        if ($auth->isService() || $ctx->isOwner($auth)) {
+        if ($auth->isService()) {
+            return self::$cache[$key] = ServicePolicy::grants($auth->sourceApp) ?? [];
+        }
+        if ($ctx->isOwner($auth)) {
             return self::$cache[$key] = self::all();
         }
 
@@ -210,7 +214,10 @@ final class Permissions
      */
     public static function grantable(Context $ctx, Auth $auth): array
     {
-        if ($auth->isService() || $ctx->isOwner($auth)) {
+        if ($auth->isService()) {
+            return [];   // a product key never hands out permissions
+        }
+        if ($ctx->isOwner($auth)) {
             return self::all();
         }
 

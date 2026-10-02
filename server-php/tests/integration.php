@@ -1811,4 +1811,71 @@ T::group('31. Inbound calls are created and callers identified by company lookup
     T::same('unavailable', $shown['body']['data']['contact_lookup_state'] ?? null, 'and the call says so to every screen');
 }
 
+// ===========================================================================
+T::group('32. Service keys: route allow-list, company, actor and environment binding (G18#31)');
+// ===========================================================================
+{
+    stubReset();
+    Context::resetForTesting();
+    Auth::adopt(null);
+    clearHeaders();
+    putenv('SERVICE_KEYS=lobby:test-lobby-key-0123456789,crm:test-crm-key-0123456789');
+    putenv('PORTAL_AUTH_BASE=http://127.0.0.1:' . (getenv('STUB_PORT') ?: '8794'));
+    putenv('SERVICE_KEY_COMPANIES');
+    $lobby = ['X-Service-Key' => 'test-lobby-key-0123456789', 'X-AIC-Environment' => 'local'];
+    $callback = ['e164' => '+919876500123', 'reason' => 'Visitor asked for a callback'];
+
+    $r = request('POST', '/v1/callbacks', ['cmp_id' => (string) CMP], $callback, $lobby);
+    T::same(403, $r['status'], 'a product acting with no person may not act for a company not bound to it');
+    T::same('service_company_not_bound', $r['body']['error']['code'] ?? null, 'and says why');
+
+    clearHeaders();
+    putenv('SERVICE_KEY_COMPANIES=lobby:' . CMP);
+    $r = request('POST', '/v1/callbacks', ['cmp_id' => (string) CMP], $callback, $lobby + ['X-Actor-Uuid' => 'someone-else']);
+    T::ok(in_array($r['status'], [200, 201], true), 'bound to the company, Lobby books a callback (its one allowed route)');
+    $audit = Db::first("SELECT actor_uuid, actor_kind FROM voice_audit_events WHERE cmp_id = :c ORDER BY 1 DESC LIMIT 1", ['c' => CMP]);
+    T::ok(!in_array('someone-else', array_values($audit ?? []), true), 'a bare X-Actor-Uuid is never recorded as the actor');
+
+    clearHeaders();
+    $r = request('GET', '/v1/calls', ['cmp_id' => (string) CMP], [], $lobby);
+    T::same(403, $r['status'], 'Lobby may not read calls: not on its route list');
+    T::same('service_route_not_allowed', $r['body']['error']['code'] ?? null, 'refused by name');
+
+    clearHeaders();
+    $r = request('POST', '/v1/callbacks', ['cmp_id' => (string) CMP], $callback, ['X-Service-Key' => 'test-lobby-key-0123456789']);
+    T::same(401, $r['status'], 'a service call that does not say its environment is refused');
+    clearHeaders();
+    $r = request('POST', '/v1/callbacks', ['cmp_id' => (string) CMP], $callback, ['X-Service-Key' => 'test-lobby-key-0123456789', 'X-AIC-Environment' => 'production']);
+    T::same('service_environment_mismatch', $r['body']['error']['code'] ?? null, 'and so is one meant for another environment');
+
+    // CRM forwarding the person's own session: the person is verified, and
+    // Manage — asked with that session — binds the company.
+    clearHeaders();
+    $crm = ['X-Service-Key' => 'test-crm-key-0123456789', 'X-AIC-Environment' => 'local', 'Authorization' => 'Bearer crm-user-session'];
+    $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer crm-user-session';
+    $r = request('GET', '/v1/calls', ['cmp_id' => (string) OTHER_CMP], [], $crm);
+    T::same(200, $r['status'], 'CRM with the person\'s session reads calls in a company Manage says they belong to');
+    clearHeaders();
+    $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer crm-user-session';
+    $r = request('GET', '/v1/calls', ['cmp_id' => '999'], [], $crm);
+    T::same(403, $r['status'], 'but not in one Manage refuses them');
+    clearHeaders();
+    $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer crm-user-session';
+    $r = request('GET', '/v1/calls', ['cmp_id' => (string) OTHER_CMP], [], $crm + ['X-Actor-Uuid' => '999']);
+    T::same('actor_mismatch', $r['body']['error']['code'] ?? null, 'an X-Actor-Uuid that disagrees with the session is refused');
+    clearHeaders();
+    $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer crm-user-session';
+    $r = request('GET', '/v1/recordings', ['cmp_id' => (string) OTHER_CMP], [], $crm);
+    T::same(403, $r['status'], 'and a CRM key never reaches recordings (not on its list)');
+
+    unset($_SERVER['HTTP_AUTHORIZATION']);
+    clearHeaders();
+    putenv('SERVICE_KEYS');
+    putenv('SERVICE_KEY_COMPANIES');
+    putenv('PORTAL_AUTH_BASE');
+    Context::resetForTesting();
+    Context::trustForTesting(CMP, $owner, true);
+    Auth::adopt($owner);
+}
+
 exit(T::summary());
