@@ -256,10 +256,15 @@ function RunResult({ run }: { run: { status: string; checks: AiCheck[] } }) {
     <div style={{ marginTop: 16, borderTop: '1px solid var(--border)', paddingTop: 14 }}>
       <div className="vspread" style={{ marginBottom: 10 }}>
         <h3 style={{ margin: 0 }}>Result</h3>
-        <Badge tone={run.status === 'passed' ? 'default' : 'red'}>
-          {run.status === 'passed' ? 'Passed' : 'Failed'}
+        <Badge tone={run.status === 'passed' ? 'default' : run.status === 'not_verified' ? 'amber' : 'red'}>
+          {run.status === 'passed' ? 'Passed' : run.status === 'not_verified' ? 'Not verified' : 'Failed'}
         </Badge>
       </div>
+
+      <p className="vmuted vsmall" style={{ marginTop: 0 }}>
+        Simulated — not evidence of booking behaviour on a live call. A check a rehearsal cannot exercise
+        says “not verified”.
+      </p>
 
       {run.checks.map((check) => (
         <Row
@@ -277,6 +282,9 @@ function RunResult({ run }: { run: { status: string; checks: AiCheck[] } }) {
             </span>
           }
           detail={check.detail}
+          trailing={check.status === 'not_verified' || check.status === 'not_applicable'
+            ? <StatusPill status={check.status} />
+            : undefined}
         />
       ))}
     </div>

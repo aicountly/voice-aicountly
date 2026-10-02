@@ -91,13 +91,13 @@ export function StatusPill({ status }: { status: string }) {
     completed: 'neutral', busy: 'red', unanswered: 'red', failed: 'red', cancelled: 'neutral',
     unknown: 'amber',
     available: 'default', wrap_up: 'amber', away: 'neutral', offline: 'neutral',
-    connected: 'default', degraded: 'amber', unavailable: 'red',
+    connected: 'default', degraded: 'amber', unavailable: 'red', enabled_unverified: 'amber',
     not_configured: 'neutral', standby: 'neutral', forbidden: 'red',
     running: 'default', paused: 'amber', draft: 'neutral', scheduled: 'neutral',
     published: 'default', tested: 'neutral', suggested: 'amber', confirmed: 'default',
     ok: 'default', warning: 'amber', exceeded: 'red', no_limit: 'neutral',
     pass: 'default', error: 'red', warn: 'amber',
-    passed: 'default', not_applicable: 'neutral',
+    passed: 'default', not_applicable: 'neutral', not_verified: 'amber',
   } as Record<string, 'default' | 'neutral' | 'amber' | 'red'>)[status] ?? 'neutral'
 
   return <Badge tone={tone} live={status === 'answered'}>{statusLabel(status)}</Badge>
@@ -108,6 +108,8 @@ export function statusLabel(status: string): string {
     unknown: 'State unknown',
     wrap_up: 'Wrap-up',
     not_configured: 'Not connected',
+    enabled_unverified: 'Enabled, not verified',
+    not_verified: 'Not verified',
     not_applicable: 'N/A',
     ai_completed: 'AI completed',
     human_completed: 'Handled by a person',

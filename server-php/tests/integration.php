@@ -1145,6 +1145,7 @@ T::group('24. No cross-app database access exists');
             'books_'                 => 'another product’s table prefix',
             'contacts_'              => 'another product’s table prefix',
             'calendar_events'        => 'another product’s table',
+            'appointment_bookings'   => 'another product’s table',
         ] as $needle => $what) {
             if (str_contains($source, $needle)) {
                 $offenders[] = basename($path) . ' contains ' . $what;
@@ -1933,6 +1934,358 @@ T::group('29. Before migration 010, callbacks work and the diary says why it can
     T::ok(CallbackDiary::schemaReady(), 'with the migration in place the diary path is available again');
 
     clearHeaders();
+}
+
+// ===========================================================================
+T::group('30. A booking step validates only when something books it');
+// ===========================================================================
+{
+    $capabilities = ProviderRegistry::forCompany(scope(CMP, $owner))->capabilities();
+    $bookingFlow = static fn (string $action): array => [
+        'entry' => 'check',
+        'nodes' => [
+            'check'   => ['type' => 'api_action', 'action' => 'check_availability', 'next' => 'confirm', 'on_failure' => 'person'],
+            'confirm' => ['type' => 'confirm', 'timeout_seconds' => 10, 'next' => 'act', 'timeout' => 'person'],
+            'act'     => ['type' => 'api_action', 'action' => $action, 'next' => 'bye', 'on_failure' => 'person'],
+            'person'  => ['type' => 'handover', 'destination' => 'reception'],
+            'bye'     => ['type' => 'end_call'],
+        ],
+    ];
+    $permissions = [
+        'check_availability' => 'allowed', 'create_booking' => 'confirm_with_caller', 'reschedule_booking' => 'confirm_with_caller',
+        'cancel_booking' => 'confirm_with_caller', 'create_payment_link' => 'confirm_with_caller',
+    ];
+    $codesAt = static fn (array $v, string $node): array => array_column(array_filter($v['errors'], static fn (array $e): bool => $e['node'] === $node), 'code');
+
+    $on = FlowValidator::validate($bookingFlow('create_booking'), $capabilities, $permissions);
+    T::ok($on['valid'], 'with Appointments connected, a confirmed booking flow is valid');
+
+    putenv('VOICE_APPOINTMENTS_ENABLED=0');
+    Features::overrideForTesting(null);
+    $off = FlowValidator::validate($bookingFlow('create_booking'), $capabilities, $permissions);
+    T::ok(!$off['valid'] && in_array('action_unavailable', $codesAt($off, 'act'), true) && in_array('action_unavailable', $codesAt($off, 'check'), true),
+        'with Appointments off, booking and availability steps are errors (F5)');
+    $message = (string) (array_values(array_filter($off['errors'], static fn (array $e): bool => $e['node'] === 'act'))[0]['message'] ?? '');
+    T::same('"Create a booking" is not available in this deployment: Voice books through Aicountly Appointments, which is not connected here. Turned off for this deployment. Set VOICE_APPOINTMENTS_ENABLED=1 in the server environment to enable it.',
+        $message, 'and the error names the reason and the switch');
+
+    // The agent cannot be published past it.
+    $ctx = scope(CMP, $owner);
+    $flowId = (int) Db::insert('voice_call_flows', ['cmp_id' => CMP, 'name' => 'Booking flow'], 'flow_id');
+    $flowVersion = (int) Db::insert('voice_call_flow_versions', [
+        'flow_id' => $flowId, 'cmp_id' => CMP, 'version_no' => 1, 'status' => 'published', 'definition' => $bookingFlow('create_booking'),
+    ], 'version_id');
+    Db::update('voice_call_flows', ['published_version_id' => $flowVersion], ['flow_id' => $flowId]);
+    $agentId = (int) Db::insert('voice_ai_agents', ['cmp_id' => CMP, 'name' => 'Booker', 'status' => 'draft'], 'ai_agent_id');
+    AiAgentService::saveDraft($ctx, $owner, $agentId, [
+        'languages' => ['en'], 'flow_id' => $flowId, 'action_permissions' => $permissions,
+        'guardrails' => ['silence_timeout_seconds' => 8, 'max_clarifications' => 2],
+    ]);
+    $refused = AiAgentService::publish($ctx, $owner, $agentId);
+    T::ok(!$refused['ok'] && in_array('action_unavailable', array_column($refused['validation']['errors'] ?? [], 'code'), true),
+        'an agent whose flow books cannot be published while Appointments is off');
+
+    putenv('VOICE_APPOINTMENTS_ENABLED');
+    Features::overrideForTesting(null);
+    T::ok(AiAgentService::publish($ctx, $owner, $agentId)['ok'], 'and can be once it is connected');
+
+    foreach (['reschedule_booking' => 'Move a booking', 'cancel_booking' => 'Cancel a booking', 'create_payment_link' => 'Send a payment link'] as $action => $label) {
+        $never = FlowValidator::validate($bookingFlow($action), $capabilities, $permissions);
+        $text = (string) (array_values(array_filter($never['errors'], static fn (array $e): bool => $e['node'] === 'act'))[0]['message'] ?? '');
+        T::ok(!$never['valid'] && str_starts_with($text, '"' . $label . '" is not available in this deployment')
+            && str_ends_with($text, 'Remove this step and hand the caller to a person.'),
+            '"' . $label . '" has no supported executor and is refused whatever the flags say');
+    }
+}
+
+// ===========================================================================
+T::group('31. An AI agent books through Appointments, once, or hands over');
+// ===========================================================================
+{
+    stubReset();
+    $ctx = scope(CMP, $owner);
+    $gateway = Auth::forTesting('service:gateway', 'service', 'gateway');
+    $service = appointmentsSeedService(CMP, ['name' => 'Tax consultation']);
+    $member = Uuid::v4();
+    $at = static fn (int $days, int $hour, int $minute = 0): string => Clock::iso(Clock::now()->modify('+' . $days . ' days')->setTime($hour, $minute));
+    foreach ([[2, 4], [2, 5], [2, 6], [3, 4], [3, 5], [3, 6], [4, 4], [4, 5]] as [$day, $hour]) {
+        appointmentsSeedOffer($service, $member, $at($day, $hour));
+    }
+
+    $versionId = (int) Db::insert('voice_ai_agent_versions', [
+        'ai_agent_id' => (int) Db::insert('voice_ai_agents', ['cmp_id' => CMP, 'name' => 'Desk', 'status' => 'published'], 'ai_agent_id'),
+        'cmp_id' => CMP, 'version_no' => 1, 'status' => 'published',
+        'action_permissions' => ['check_availability' => 'allowed', 'create_booking' => 'confirm_with_caller', 'reschedule_booking' => 'confirm_with_caller'],
+    ], 'version_id');
+    $newCall = static function (?string $number = '+919876500011') use ($versionId): int {
+        return (int) Db::insert('voice_calls', [
+            'call_uuid' => Uuid::v4(), 'cmp_id' => CMP, 'direction' => 'inbound', 'remote_e164' => $number,
+            'ai_version_id' => $versionId, 'handled_by' => 'ai', 'state' => 'answered',
+        ], 'call_id');
+    };
+    $act = static function (int $callId, string $action, string $toolCallId, array $arguments = [], bool $confirmed = true, ?Auth $as = null) use ($gateway): array {
+        Auth::adopt($as ?? $gateway);
+
+        return request('POST', '/v1/calls/' . $callId . '/ai-actions', ['cmp_id' => (string) CMP], [
+            'action' => $action, 'tool_call_id' => $toolCallId, 'arguments' => $arguments, 'caller_confirmed' => $confirmed,
+        ]);
+    };
+    $callId = $newCall();
+
+    Context::trustForTesting(CMP, $owner);
+    $byUser = $act($callId, 'check_availability', 'tc-0', ['service_uuid' => $service], true, $owner);
+    $byLobby = $act($callId, 'check_availability', 'tc-0', ['service_uuid' => $service], true, Auth::forTesting('service:lobby', 'service', 'lobby'));
+    T::same([403, 403], [$byUser['status'], $byLobby['status']], 'only the Voice Gateway may run an agent’s action — not a person, not another product');
+
+    $slots = $act($callId, 'check_availability', 'tc-1', ['service_uuid' => $service]);
+    $first = $slots['body']['data']['slots'][0] ?? [];
+    T::ok(($slots['body']['data']['outcome'] ?? null) === 'slots' && count($slots['body']['data']['slots']) === 3
+        && str_starts_with((string) $slots['body']['data']['say'], 'I can offer '),
+        'availability comes from Appointments’ own slots, offered in words');
+    $sentSlots = appointmentsRequests('GET', 'v1/availability/slots');
+    T::same(['test-appointments-service-key-0123456789', (string) CMP, $service],
+        [$sentSlots[0]['headers']['x-service-key'] ?? null, $sentSlots[0]['query']['cmp_id'] ?? null, $sentSlots[0]['query']['service_uuid'] ?? null],
+        'asked with Voice’s Appointments key, for the call’s company');
+
+    $book = ['service_uuid' => $service, 'member_uuid' => $first['member_uuid'] ?? '', 'starts_at' => $first['starts_at'] ?? '', 'client_name' => 'Asha Rao'];
+    $unconfirmed = $act($callId, 'create_booking', 'tc-2', $book, false);
+    T::same([409, 'confirmation_required', 0], [$unconfirmed['status'], $unconfirmed['body']['error']['code'] ?? null, count(appointmentsRequests('POST'))],
+        'a booking without the caller’s confirmation is refused before anything is sent');
+
+    $booked = $act($callId, 'create_booking', 'tc-2', $book);
+    $data = $booked['body']['data'] ?? [];
+    $posts = appointmentsRequests('POST', 'v1/bookings');
+    T::ok(($data['outcome'] ?? null) === 'booked' && ($data['confirmed'] ?? null) === true && str_starts_with((string) ($data['booking']['reference'] ?? ''), 'APT-'),
+        'a booking Appointments answered with is confirmed, with its reference');
+    T::ok(str_starts_with((string) ($data['say'] ?? ''), "You're booked for ") && str_ends_with((string) $data['say'], 'Your booking reference is ' . $data['booking']['reference'] . '.'),
+        'and only then does the agent say "booked"');
+    T::same(['voice:ai:' . $callId . ':tc-2', '+919876500011', null, null],
+        [$posts[0]['headers']['idempotency-key'] ?? null, $posts[0]['body']['client_phone'] ?? null, $posts[0]['body']['override_rules'] ?? null, $posts[0]['body']['status'] ?? null],
+        'sent once, under the tool call’s own Idempotency-Key, for the caller’s number, never as an override');
+    $op = Db::first("SELECT * FROM voice_external_operations WHERE target_app = 'appointments' AND correlation_id = :c", ['c' => 'voice:ai:' . $callId . ':tc-2']);
+    T::same([ExternalOperations::SUCCEEDED, $data['booking']['booking_uuid']], [$op['status'] ?? null, $op['external_ref'] ?? null],
+        'the operation holds Appointments’ booking id, and no copy of the booking');
+
+    $again = $act($callId, 'create_booking', 'tc-2', $book);
+    T::same([true, $data['booking']['booking_uuid'], 1, 1],
+        [$again['body']['data']['confirmed'] ?? null, $again['body']['data']['booking']['booking_uuid'] ?? null, count(appointmentsRequests('POST')), count(appointmentsStub()['bookings'])],
+        'a retried tool call answers with the same booking and sends nothing new (F3)');
+    $reused = $act($callId, 'create_booking', 'tc-2', ['starts_at' => $at(3, 4)] + $book);
+    T::same([422, 'tool_call_reused'], [$reused['status'], $reused['body']['error']['code'] ?? null], 'one tool call id cannot stand for two different bookings');
+
+    // Somebody else took the time between the offer and the commit.
+    $taken = $at(2, 5);
+    appointmentsSeedBooking(CMP, $service, $member, $taken);
+    $lost = $act($callId, 'create_booking', 'tc-3', ['starts_at' => $taken] + $book)['body']['data'] ?? [];
+    T::ok(($lost['outcome'] ?? null) === 'slot_taken' && ($lost['confirmed'] ?? null) === false && count($lost['alternatives'] ?? []) > 0
+        && !in_array($taken, array_column($lost['alternatives'], 'starts_at'), true),
+        'slot taken: refused, never booked, and other free times are offered');
+    T::ok(str_starts_with((string) ($lost['say'] ?? ''), 'That time has just been taken. I can offer ') && stripos((string) $lost['say'], 'booked') === false,
+        'and the caller hears exactly that');
+    T::same(ExternalOperations::FAILED, (string) Db::scalar("SELECT status FROM voice_external_operations WHERE correlation_id = :c", ['c' => 'voice:ai:' . $callId . ':tc-3']),
+        'the attempt is recorded as refused by the owner, not unknown');
+
+    // A time Appointments does not offer.
+    $odd = $act($callId, 'create_booking', 'tc-4', ['starts_at' => $at(2, 4, 17)] + $book)['body']['data'] ?? [];
+    T::ok(($odd['outcome'] ?? null) === 'not_bookable' && str_starts_with((string) ($odd['say'] ?? ''), "I can't book that time. I can offer "),
+        'a time Appointments will not offer is not booked, and alternatives are offered');
+
+    // The answer is lost after Appointments booked: read back, adopt, one booking.
+    $postsBefore = count(appointmentsRequests('POST'));
+    stubMode('appointments', 'commit_then_drop');
+    $dropped = $act($callId, 'create_booking', 'tc-5', ['starts_at' => $at(3, 4)] + $book)['body']['data'] ?? [];
+    T::ok(($dropped['outcome'] ?? null) === 'booked' && count(appointmentsRequests('POST')) === $postsBefore + 1 && count(appointmentsStub()['bookings']) === 3,
+        'a lost answer is read back and the booking adopted — no second request, no second booking');
+
+    // The request is lost before Appointments acted: resent under the SAME key.
+    stubMode('appointments', 'drop_once');
+    $resent = $act($callId, 'create_booking', 'tc-6', ['starts_at' => $at(3, 5)] + $book)['body']['data'] ?? [];
+    $keys = array_column(array_column(array_slice(appointmentsRequests('POST'), -2), 'headers'), 'idempotency-key');
+    T::ok(($resent['outcome'] ?? null) === 'booked' && $keys === ['voice:ai:' . $callId . ':tc-6', 'voice:ai:' . $callId . ':tc-6'] && count(appointmentsStub()['bookings']) === 4,
+        'a request lost before Appointments acted is resent with the same Idempotency-Key, once');
+
+    // Lost answer AND no read-back: pending verification, a person follows up.
+    stubMode('appointments', 'commit_then_drop_lookup_down');
+    $unknown = $act($callId, 'create_booking', 'tc-7', ['starts_at' => $at(3, 6)] + $book)['body']['data'] ?? [];
+    T::ok(($unknown['outcome'] ?? null) === 'pending_verification' && ($unknown['confirmed'] ?? null) === false
+        && ($unknown['say'] ?? null) === "I've sent your booking request, but I can't confirm it yet, so please don't book again; I'll pass your request to the team, and someone will call you back.",
+        'when the outcome cannot be known the caller is told so — never "booked", never "failed"');
+    T::ok(($unknown['callback']['callback_id'] ?? 0) > 0 && (int) Db::scalar('SELECT COUNT(*) FROM voice_callbacks WHERE source_call_id = :c', ['c' => $callId]) === 1,
+        'and a callback exists before the agent promises one');
+    T::same(ExternalOperations::UNKNOWN, (string) Db::scalar("SELECT status FROM voice_external_operations WHERE correlation_id = :c", ['c' => 'voice:ai:' . $callId . ':tc-7']),
+        'the operation stays unknown');
+    stubMode('appointments', 'up');
+    $settled = $act($callId, 'create_booking', 'tc-7', ['starts_at' => $at(3, 6)] + $book)['body']['data'] ?? [];
+    T::ok(($settled['outcome'] ?? null) === 'booked' && count(appointmentsStub()['bookings']) === 5 && count(appointmentsRequests('POST')) === $postsBefore + 4,
+        'the retried tool call reads back and adopts that one booking, sending nothing new');
+    T::same(1, (int) Db::scalar('SELECT COUNT(*) FROM voice_callbacks WHERE source_call_id = :c', ['c' => $callId]), 'and makes no second callback');
+
+    // The recovery worker settles one the call never heard back about.
+    stubMode('appointments', 'commit_then_drop_lookup_down');
+    $act($callId, 'create_booking', 'tc-8', ['starts_at' => $at(4, 4)] + $book);
+    stubMode('appointments', 'up');
+    $postsBefore = count(appointmentsRequests('POST'));
+    $output = runRecovery();
+    T::ok(str_contains($output, 'operations_reconciled=')
+        && (string) Db::scalar("SELECT status FROM voice_external_operations WHERE correlation_id = :c", ['c' => 'voice:ai:' . $callId . ':tc-8']) === ExternalOperations::SUCCEEDED
+        && count(appointmentsStub()['bookings']) === 6 && count(appointmentsRequests('POST')) === $postsBefore,
+        'the recovery worker reads back and adopts the booking (no resend, still one)');
+
+    // Appointments said it did not take the booking: a person takes over; never resent.
+    stubMode('appointments', 'calendar_down');
+    $refused = $act($callId, 'create_booking', 'tc-9', ['starts_at' => $at(4, 5)] + $book)['body']['data'] ?? [];
+    T::ok(($refused['outcome'] ?? null) === 'refused' && ($refused['say'] ?? null) === "I can't book that from this call; I'll pass your request to the team, and someone will call you back.",
+        'a booking Appointments refused is handed to a person, in those words');
+    T::same(ExternalOperations::FAILED, (string) Db::scalar("SELECT status FROM voice_external_operations WHERE correlation_id = :c", ['c' => 'voice:ai:' . $callId . ':tc-9']),
+        'and is not left for a later resend behind the team’s back');
+
+    // Appointments not answering at all: nothing sent, hand-off.
+    stubMode('appointments', 'down');
+    $before = count(appointmentsRequests('POST'));
+    $down = $act($callId, 'create_booking', 'tc-10', ['starts_at' => $at(4, 5)] + $book)['body']['data'] ?? [];
+    T::ok(($down['outcome'] ?? null) === 'unavailable' && ($down['confirmed'] ?? null) === false && $before === count(appointmentsRequests('POST')),
+        'with Appointments down before the booking, nothing is sent and the caller is handed over');
+    stubMode('appointments', 'up');
+
+    // A deposit Voice cannot take on a call.
+    $paid = appointmentsSeedService(CMP, ['name' => 'Paid session', 'deposit_required' => true, 'deposit_minor' => 50000]);
+    $deposit = $act($callId, 'create_booking', 'tc-11', ['service_uuid' => $paid] + $book)['body']['data'] ?? [];
+    T::ok(($deposit['outcome'] ?? null) === 'not_bookable'
+        && str_starts_with((string) ($deposit['say'] ?? ''), "That appointment needs a deposit, which I can't take on this call; I'll pass your request"),
+        'a service that takes a deposit is handed to a person, not booked unpaid');
+
+    // A service that asks for confirmation: "requested", not "booked".
+    $approval = appointmentsSeedService(CMP, ['name' => 'Assessment', 'requires_confirmation' => true]);
+    appointmentsSeedOffer($approval, $member, $at(5, 4));
+    $requested = $act($callId, 'create_booking', 'tc-12', ['service_uuid' => $approval, 'starts_at' => $at(5, 4)] + $book)['body']['data'] ?? [];
+    T::ok(($requested['outcome'] ?? null) === 'requested' && str_starts_with((string) ($requested['say'] ?? ''), "I've requested "),
+        'a booking Appointments holds as PENDING is "requested", not "booked"');
+
+    // Moving a booking has no supported path: hand-off, whatever the flag.
+    $move = $act($callId, 'reschedule_booking', 'tc-13', ['booking_reference' => 'APT-1001'])['body']['data'] ?? [];
+    T::same(['handoff', false, "I can't move that booking from this call; I'll pass your request to the team, and someone will call you back."],
+        [$move['outcome'] ?? null, $move['confirmed'] ?? null, $move['say'] ?? null], 'moving a booking is handed to a person, with a callback');
+    $denied = $act($callId, 'cancel_booking', 'tc-14');
+    T::same([403, 'not_permitted'], [$denied['status'], $denied['body']['error']['code'] ?? null], 'an action the agent version may not take is refused');
+
+    // Switched off: no request at all, the exact words, one callback per tool call.
+    putenv('VOICE_APPOINTMENTS_ENABLED=0');
+    Features::overrideForTesting(null);
+    $offCall = $newCall('+919876500012');
+    $requestsBefore = count(appointmentsStub()['log']);
+    $offAnswer = $act($offCall, 'create_booking', 'tc-1', $book)['body']['data'] ?? [];
+    T::same(['handoff', false, "I can't book that from this call; I'll pass your request to the team, and someone will call you back."],
+        [$offAnswer['outcome'] ?? null, $offAnswer['confirmed'] ?? null, $offAnswer['say'] ?? null],
+        'switched off, the agent says it cannot book from the call and passes it on (F3)');
+    $callback = Db::first('SELECT * FROM voice_callbacks WHERE source_call_id = :c', ['c' => $offCall]);
+    T::ok($callback !== null && $callback['priority'] === 'high' && $callback['e164'] === '+919876500012'
+        && str_contains((string) $callback['reason'], 'Create a booking') && str_contains((string) $callback['reason'], 'VOICE_APPOINTMENTS_ENABLED'),
+        'the callback carries the caller’s number and why the agent could not book');
+    $act($offCall, 'create_booking', 'tc-1', $book);
+    T::same([1, $requestsBefore], [(int) Db::scalar('SELECT COUNT(*) FROM voice_callbacks WHERE source_call_id = :c', ['c' => $offCall]), count(appointmentsStub()['log'])],
+        'a retried hand-off makes no second callback, and nothing reaches Appointments');
+    putenv('VOICE_APPOINTMENTS_ENABLED');
+    Features::overrideForTesting(null);
+
+    // No number to reach the caller on: no booking, and no promise of a callback.
+    $withheld = $act($newCall(null), 'create_booking', 'tc-1', $book)['body']['data'] ?? [];
+    T::same("I can't book that from this call without a number to reach you on, and I couldn't arrange a call back just now. Please ask for a person, or call us again.",
+        $withheld['say'] ?? null, 'with no number, no booking and no callback is promised');
+
+    Db::update('voice_calls', ['ended_at' => Clock::sql(Clock::now()), 'state' => 'completed'], ['call_id' => $callId]);
+    T::same(409, $act($callId, 'check_availability', 'tc-99', ['service_uuid' => $service])['status'], 'an ended call takes no actions');
+
+    Auth::adopt($owner);
+    clearHeaders();
+}
+
+// ===========================================================================
+T::group('32. Rehearsal checks run the booking code, or say they could not');
+// ===========================================================================
+{
+    $ctx = scope(CMP, $owner);
+    $agentId = (int) Db::scalar("SELECT ai_agent_id FROM voice_ai_agents WHERE cmp_id = :c AND name = 'Booker'", ['c' => CMP]);
+    $requestsBefore = count(appointmentsStub()['log']);
+    $opsBefore = (int) Db::scalar('SELECT COUNT(*) FROM voice_external_operations');
+    $checkOf = static function (array $run, string $key): array {
+        foreach ($run['run']['checks'] ?? [] as $check) {
+            if ($check['key'] === $key) {
+                return $check;
+            }
+        }
+
+        return [];
+    };
+
+    $twice = AiAgentService::rehearse($ctx, $owner, $agentId, 'duplicate_tool_call');
+    $check = $checkOf($twice, 'idempotent_external_writes');
+    T::ok(($check['status'] ?? null) === 'passed' && str_starts_with((string) $check['detail'], 'Simulated against a stand-in for Appointments'),
+        'the same booking twice is exercised through Voice’s booking code, and passes on evidence');
+    $down = AiAgentService::rehearse($ctx, $owner, $agentId, 'api_unavailable');
+    T::same('passed', $checkOf($down, 'no_local_fallback')['status'] ?? null, 'an owner that stops answering mid-booking claims nothing');
+    T::same([$requestsBefore, $opsBefore], [count(appointmentsStub()['log']), (int) Db::scalar('SELECT COUNT(*) FROM voice_external_operations')],
+        'a rehearsal sends nothing to Appointments and keeps nothing');
+
+    $plain = (int) Db::scalar("SELECT ai_agent_id FROM voice_ai_agents WHERE cmp_id = :c AND name = 'Asha'", ['c' => CMP]);
+    T::same('not_applicable', $checkOf(AiAgentService::rehearse($ctx, $owner, $plain, 'duplicate_tool_call'), 'idempotent_external_writes')['status'] ?? null,
+        'a flow that writes nothing elsewhere has nothing to repeat — not a pass');
+
+    $cancelFlow = (int) Db::insert('voice_call_flows', ['cmp_id' => CMP, 'name' => 'Cancel flow'], 'flow_id');
+    Db::update('voice_call_flows', ['draft_version_id' => (int) Db::insert('voice_call_flow_versions', [
+        'flow_id' => $cancelFlow, 'cmp_id' => CMP, 'version_no' => 1, 'status' => 'draft', 'definition' => [
+            'entry' => 'cancel', 'nodes' => ['cancel' => ['type' => 'api_action', 'action' => 'cancel_booking', 'next' => 'bye'], 'bye' => ['type' => 'end_call']],
+        ],
+    ], 'version_id')], ['flow_id' => $cancelFlow]);
+    $canceller = (int) Db::insert('voice_ai_agents', ['cmp_id' => CMP, 'name' => 'Canceller', 'status' => 'draft'], 'ai_agent_id');
+    AiAgentService::saveDraft($ctx, $owner, $canceller, ['flow_id' => $cancelFlow, 'guardrails' => ['silence_timeout_seconds' => 8, 'max_clarifications' => 2]]);
+    $cancelCheck = $checkOf(AiAgentService::rehearse($ctx, $owner, $canceller, 'duplicate_tool_call'), 'idempotent_external_writes');
+    T::ok(($cancelCheck['status'] ?? null) === 'failed' && str_contains((string) $cancelCheck['detail'], '"Cancel a booking" cannot run from a call'),
+        'a write nothing carries out fails the check instead of passing it');
+
+    $recording = AiAgentService::rehearse($ctx, $owner, $plain, 'declines_recording');
+    T::ok(($checkOf($recording, 'refusal_recorded')['status'] ?? null) === 'not_verified' && in_array($recording['run']['status'], ['not_verified', 'failed'], true),
+        'what a rehearsal cannot exercise is "not verified", and the run is not a pass');
+}
+
+// ===========================================================================
+T::group('33. Command Centre says "Connected" only after a real probe');
+// ===========================================================================
+{
+    stubReset();
+    Db::run('DELETE FROM voice_integrations WHERE cmp_id = :c', ['c' => CMP]);
+    Auth::adopt($person);
+    Context::trustForTesting(CMP, $person);
+    $workflows = static function (): array {
+        $out = [];
+        foreach (request('GET', '/v1/dashboards/command-centre', ['cmp_id' => (string) CMP])['body']['data']['panels']['workflows'] ?? [] as $entry) {
+            $out[$entry['app']] = $entry;
+        }
+
+        return $out;
+    };
+
+    $flagOnly = $workflows();
+    T::same(['enabled_unverified', 'enabled_unverified', 'enabled_unverified', 'not_configured'],
+        [$flagOnly['appointments']['status'] ?? null, $flagOnly['calendar']['status'] ?? null, $flagOnly['crm']['status'] ?? null, $flagOnly['pay']['status'] ?? null],
+        'a switched-on flag alone is "Enabled, not verified", never "Connected"');
+
+    request('GET', '/v1/integrations', ['cmp_id' => (string) CMP, 'probe' => '1']);
+    $probed = $workflows();
+    $sent = appointmentsRequests('GET', 'v1/services');
+    T::same(['connected', 'connected', 'test-appointments-service-key-0123456789'],
+        [$probed['appointments']['status'] ?? null, $probed['calendar']['status'] ?? null, end($sent)['headers']['x-service-key'] ?? null],
+        'an authenticated probe that succeeded earns "Connected"');
+    T::same('enabled_unverified', $probed['crm']['status'] ?? null, 'a health check alone does not (CRM has no authenticated probe)');
+
+    stubMode('appointments', 'reject_key');
+    request('GET', '/v1/integrations', ['cmp_id' => (string) CMP, 'probe' => '1']);
+    $rejected = $workflows();
+    T::ok(($rejected['appointments']['status'] ?? null) === 'degraded' && str_contains((string) ($rejected['appointments']['reason'] ?? ''), 'service key'),
+        'a rejected key shows as degraded, with the reason');
+
+    Auth::adopt($owner);
+    clearHeaders();
+    stubReset();
 }
 
 exit(T::summary());

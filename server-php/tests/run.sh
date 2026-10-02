@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run the Voice tests against a throwaway PostgreSQL database and a local stub
-# standing in for Manage, Contacts, Calendar, CRM and the voice gateway.
+# standing in for Manage, Contacts, Calendar, Appointments, CRM and the voice gateway.
 #
 #   server-php/tests/run.sh
 #
@@ -37,6 +37,7 @@ CONTACTS_API_BASE=http://127.0.0.1:$STUB_PORT
 CALENDAR_API_BASE=http://127.0.0.1:$STUB_PORT
 CRM_API_BASE=http://127.0.0.1:$STUB_PORT
 PAY_API_BASE=http://127.0.0.1:$STUB_PORT
+APPOINTMENTS_API_BASE=http://127.0.0.1:$STUB_PORT
 VOICE_GATEWAY_URL=http://127.0.0.1:$STUB_PORT
 VOICE_GATEWAY_KEY=test-gateway-key
 
@@ -48,6 +49,11 @@ VOICE_CALENDAR_ENABLED=1
 VOICE_CRM_ENABLED=1
 CALENDAR_SERVICE_KEY=test-calendar-service-key-0123456789
 CRM_SERVICE_KEY=test-crm-service-key-0123456789
+VOICE_APPOINTMENTS_ENABLED=1
+APPOINTMENTS_SERVICE_KEY=test-appointments-service-key-0123456789
+
+# The Voice Gateway's key for an AI agent's action steps.
+SERVICE_KEYS=gateway:test-gateway-inbound-key-0123456789
 
 # A real 32-byte key, so credential encryption is exercised rather than skipped.
 CREDENTIAL_ENCRYPTION_KEY=$(head -c 32 /dev/urandom | base64)

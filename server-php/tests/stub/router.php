@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 /**
- * A stand-in for Manage, Contacts, Calendar, CRM and the voice gateway.
+ * A stand-in for Manage, Contacts, Calendar, Appointments, CRM and the voice gateway.
  *
  * The test suite must never call a real product. This answers the handful of
  * endpoints Voice actually uses, and — more usefully — can be told to FAIL, so
@@ -14,6 +14,8 @@ declare(strict_types=1);
  *
  *   calendar=…         → see calendar_v1.php: down, timeout, commit_then_drop,
  *                        in_progress, schema_not_ready, reject_key, pre_v1
+ *   appointments=…     → see appointments_v1.php: down, timeout, drop_once,
+ *                        commit_then_drop, reject_key, lookup_down, calendar_down
  *   contacts=down      → Contacts answers 503
  *   crm=down           → CRM answers 503
  *
@@ -149,6 +151,14 @@ if (str_starts_with($path, 'contacts')) {
 if (str_starts_with($path, 'calendar/')) {
     require __DIR__ . '/calendar_v1.php';
     calendar_v1($method, $path, $body);
+}
+
+// ---------------------------------------------------------------------------
+// Appointments — the partner API, from its routes (see appointments_v1.php)
+// ---------------------------------------------------------------------------
+if (str_starts_with($path, 'v1/')) {
+    require __DIR__ . '/appointments_v1.php';
+    appointments_v1($method, $path, $body);
 }
 
 // ---------------------------------------------------------------------------

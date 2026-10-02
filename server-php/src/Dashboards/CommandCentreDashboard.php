@@ -36,6 +36,13 @@ use Aicountly\Api\Support\Clock;
  */
 final class CommandCentreDashboard extends Dashboard
 {
+    /**
+     * Products whose Integrations probe is an authenticated read with Voice's
+     * own key (NetworkController::integrations). For the others the probe is a
+     * health check, which a missing or wrong key passes.
+     */
+    private const VERIFIED_BY_PROBE = ['calendar', 'appointments'];
+
     public function id(): string
     {
         return 'command_centre';
@@ -343,6 +350,10 @@ final class CommandCentreDashboard extends Dashboard
      * is not a booking. A product that is not connected says so rather than
      * showing a zero that looks like failure.
      *
+     * "Connected" is earned, not configured: only when Integrations → Test all
+     * last proved Voice's key with an authenticated read (the products in
+     * VERIFIED_BY_PROBE). A switched-on flag alone is "Enabled, not verified".
+     *
      * @return list<array<string, mixed>>
      */
     private function connectedWorkflows(string $fromIso, string $toIso): array
@@ -364,17 +375,44 @@ final class CommandCentreDashboard extends Dashboard
             $byApp[$app]['operations'][(string) $row['operation']] = (int) $row['confirmed'];
         }
 
+        $probes = [];
+        foreach (Db::all('SELECT * FROM voice_integrations WHERE cmp_id = :cmp', ['cmp' => $this->ctx->cmpId]) as $row) {
+            $probes[(string) $row['app']] = $row;
+        }
+
         $out = [];
-        foreach (['calendar' => 'Aicountly Calendar', 'crm' => 'Aicountly CRM', 'pay' => 'Aicountly Pay', 'lobby' => 'Aicountly Lobby'] as $app => $label) {
+        $apps = [
+            'calendar'     => 'Aicountly Calendar',
+            'appointments' => 'Aicountly Appointments',
+            'crm'          => 'Aicountly CRM',
+            'pay'          => 'Aicountly Pay',
+            'lobby'        => 'Aicountly Lobby',
+        ];
+        foreach ($apps as $app => $label) {
             $enabled = Features::enabled(strtoupper($app));
+            $probe = $probes[$app] ?? null;
+            $probed = $probe === null ? '' : (string) $probe['status'];
+
+            [$status, $reason] = match (true) {
+                !$enabled => ['not_configured', Features::explain(strtoupper($app))],
+                $probed === 'connected' && in_array($app, self::VERIFIED_BY_PROBE, true) => ['connected', null],
+                in_array($probed, ['degraded', 'unavailable', 'forbidden'], true) => [$probed, $probe['status_detail'] ?? null],
+                in_array($app, self::VERIFIED_BY_PROBE, true) => ['enabled_unverified',
+                    'Enabled, not verified: no authenticated check has proved Voice\'s key yet. Run Integrations → Test all.'],
+                default => ['enabled_unverified',
+                    'Enabled, not verified: Voice has no authenticated check for ' . $label . ', and a health check does not prove its key.'],
+            };
+
             $out[] = [
-                'app'       => $app,
-                'label'     => $label,
-                'status'    => $enabled ? 'connected' : 'not_configured',
-                'reason'    => $enabled ? null : Features::explain(strtoupper($app)),
-                'confirmed' => $enabled ? ($byApp[$app]['confirmed'] ?? 0) : null,
+                'app'        => $app,
+                'label'      => $label,
+                'status'     => $status,
+                'reason'     => $reason,
+                'checked_at' => $probe['checked_at'] ?? null,
+                'last_ok_at' => $probe['last_ok_at'] ?? null,
+                'confirmed'  => $enabled ? ($byApp[$app]['confirmed'] ?? 0) : null,
                 'operations' => $enabled ? ($byApp[$app]['operations'] ?? []) : [],
-                'note'      => $enabled ? 'Counted from outcomes this product acknowledged.' : null,
+                'note'       => $enabled ? 'Counted from outcomes this product acknowledged.' : null,
             ];
         }
 

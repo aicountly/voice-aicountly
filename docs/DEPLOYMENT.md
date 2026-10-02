@@ -335,3 +335,93 @@ signature scheme against the connection named in the path, and the only thing it
 can do is move Voice-owned call state on that connection. A correctly signed
 callback almost always answers 200 — including duplicates and out-of-order
 events — because a carrier that receives a non-2xx retries for hours.
+
+## Aicountly Appointments (bookings an AI agent makes on a call)
+
+Appointments owns every customer booking. An AI agent's `check_availability`
+and `create_booking` steps are carried out by Voice through Appointments'
+partner API, and the agent may say "booked" only with Appointments' own answer
+in hand (the booking's id and reference). Voice keeps the operation and the
+booking id, never a copy of the booking. Contract: calendar-react-app
+`docs/ecosystem-alignment/CONTRACTS.md` §0, §12–§14.
+
+**Off by default** (`VOICE_APPOINTMENTS_ENABLED=0`). While it is off:
+
+- a call flow or AI agent with a booking or availability step cannot be
+  published — the validation error reads `"Create a booking" is not available
+  in this deployment: Voice books through Aicountly Appointments, which is not
+  connected here. Turned off for this deployment. Set
+  VOICE_APPOINTMENTS_ENABLED=1 in the server environment to enable it.`;
+- an agent that reaches such a step anyway creates a high-priority callback for
+  the team and says "I can't book that from this call; I'll pass your request
+  to the team, and someone will call you back." (without the promise when no
+  callback could be made);
+- Integrations and the Command Centre show Appointments "Not connected".
+
+**Never available yet, whatever the flag:** `reschedule_booking` and
+`cancel_booking` (Appointments has no way for a partner to move or cancel a
+booking on a caller's behalf under the booking's own client rules),
+`create_payment_link` and `create_task` (no executor). Flows containing them do
+not publish; a call that reaches one is handed to a person in the same way.
+
+### Switching it on
+
+1. Generate a key: `openssl rand -hex 32`.
+2. On the Appointments host, add it to `SERVICE_KEYS` as `voice:<key>`.
+3. On the Voice host:
+
+   ```
+   VOICE_APPOINTMENTS_ENABLED=1
+   APPOINTMENTS_SERVICE_KEY=<the same key>
+   # APPOINTMENTS_API_BASE=   only to override the derived host
+   ```
+
+4. Give the Voice Gateway its own key for the action endpoint:
+   `SERVICE_KEYS=…,gateway:<another openssl rand -hex 32>` on the Voice host,
+   and the same value in the Gateway's configuration.
+5. Integrations → **Test all** must show Appointments **Connected** — an
+   authenticated read of one service with Voice's key, for that company. Until
+   it does, the Command Centre shows "Enabled, not verified".
+6. `bin/call-recovery.php` (already on cron) settles any booking whose answer
+   was lost: it reads back what Appointments holds for that time, service and
+   caller's number, adopts it, or resends the same request under the same
+   Idempotency-Key. No new cron is needed.
+
+Switching it off again stops new bookings at once; bookings already made stay
+in Appointments, where they are managed.
+
+### The Gateway's contract: `POST /api/v1/calls/{call_id}/ai-actions?cmp_id=<id>`
+
+`X-Service-Key: <the gateway key>`. Body:
+
+```json
+{
+  "action": "create_booking",
+  "tool_call_id": "turn-14-book",
+  "caller_confirmed": true,
+  "arguments": {
+    "service_uuid": "…", "member_uuid": "…",
+    "starts_at": "2026-10-06T10:30:00+05:30",
+    "client_name": "Asha Rao"
+  }
+}
+```
+
+- `tool_call_id` is generated once per intent and reused on every retry of it;
+  Voice derives the Appointments `Idempotency-Key` from it
+  (`voice:ai:<call_id>:<tool_call_id>`). A different request under the same id
+  is refused (`422 tool_call_reused`).
+- `member_uuid` and `starts_at` come from a `check_availability` slot;
+  `starts_at` must carry its offset. The caller's number is the call's own
+  (`client_phone` is accepted only when the call has none).
+- A consequential action needs `caller_confirmed: true` (`409
+  confirmation_required` otherwise). The call must be live and pinned to an AI
+  agent version, whose stored permissions decide.
+
+The answer (`200`) carries `outcome` (`slots`, `no_slots`, `booked`,
+`booked_pending_confirmation`, `requested`, `slot_taken`, `not_bookable`,
+`pending_verification`, `refused`, `unavailable`, `handoff`), `confirmed` (true
+only with Appointments' booking in hand), `say` — **the exact sentence the
+agent may speak, and nothing stronger** — and `booking`, `slots`,
+`alternatives`, `callback`, `operation`, `detail` (for operators; never
+spoken). Refusals carry `error.details.say` for the same reason.

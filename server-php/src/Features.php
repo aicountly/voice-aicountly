@@ -9,7 +9,7 @@ namespace Aicountly\Api;
  *
  * THE POINT OF THIS CLASS is to make it impossible to ship a placeholder that
  * looks connected. Voice has a real client and a real contract for Calendar,
- * CRM, Pay, Lobby and Messaging — and a flag for each that is OFF until the
+ * Appointments, CRM, Pay, Lobby and Messaging — and a flag for each that is OFF until the
  * other side is configured and answering, so the Integrations screen says
  * "Aicountly Pay is not connected" rather than drawing a payments panel full of
  * money nobody collected.
@@ -53,6 +53,9 @@ final class Features
         // Other products.
         'CONTACTS'        => [],
         'CALENDAR'        => ['CALENDAR_SERVICE_KEY'],
+        // Customer bookings an AI agent makes during a call. Appointments owns
+        // them; Voice asks with its own key (label `voice` there).
+        'APPOINTMENTS'    => ['APPOINTMENTS_SERVICE_KEY'],
         'CRM'             => ['CRM_SERVICE_KEY'],
         'PAY'             => ['PAY_SERVICE_KEY'],
         'LOBBY'           => ['LOBBY_SERVICE_KEY'],

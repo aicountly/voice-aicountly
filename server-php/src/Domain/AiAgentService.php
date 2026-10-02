@@ -30,7 +30,11 @@ use Aicountly\Api\Telephony\ProviderRegistry;
  * A rehearsal never places a call and never writes to another product. Its
  * scenarios are the hard ones — the caller changes their mind mid-sentence, the
  * owning product is down, the same action is attempted twice — and the checks
- * are evaluated against the agent's ACTUAL configuration. Every badge on the
+ * are evaluated against the agent's ACTUAL configuration. The two about
+ * writes into another product (the owner is down; the same action twice) run
+ * Voice's own booking code against a stand-in for Appointments, in a
+ * transaction that is rolled back. A check a rehearsal cannot exercise says
+ * "not verified", and a run holding one is not a pass. Every badge on the
  * Studio screen is rendered from a row this produced. There is no hardcoded
  * "passed" anywhere in this product.
  *
@@ -274,21 +278,20 @@ final class AiAgentService
 
         $checks = self::runScenario($ctx, $version, $scenario);
 
-        $failed = false;
-        foreach ($checks as $check) {
-            if ($check['status'] === 'failed') {
-                $failed = true;
-                break;
-            }
-        }
+        // A check a rehearsal could not exercise is "not verified", and a run
+        // holding one is not a pass: the badge says so instead of going green.
+        $statuses = array_column($checks, 'status');
+        $verdict = in_array('failed', $statuses, true)
+            ? 'failed'
+            : (in_array('not_verified', $statuses, true) ? 'not_verified' : 'passed');
 
         Db::update('voice_ai_test_runs', [
-            'status'      => $failed ? 'failed' : 'passed',
+            'status'      => $verdict,
             'checks'      => $checks,
             'finished_at' => Clock::sql(Clock::now()),
         ], ['test_run_id' => $runId, 'cmp_id' => $ctx->cmpId]);
 
-        if (!$failed && (string) $agent['status'] === 'draft') {
+        if ($verdict === 'passed' && (string) $agent['status'] === 'draft') {
             Db::update('voice_ai_agents', ['status' => 'tested', 'updated_at' => Clock::sql(Clock::now())], [
                 'ai_agent_id' => $agentId, 'cmp_id' => $ctx->cmpId,
             ]);
@@ -301,7 +304,7 @@ final class AiAgentService
                 'scenario'    => $scenario,
                 'mode'        => 'simulated',
                 'simulated'   => true,
-                'status'      => $failed ? 'failed' : 'passed',
+                'status'      => $verdict,
                 'checks'      => $checks,
             ],
         ];
@@ -326,6 +329,11 @@ final class AiAgentService
         $checks = [];
         $check = static function (string $key, string $label, bool $passed, string $detail) use (&$checks): void {
             $checks[] = ['key' => $key, 'label' => $label, 'status' => $passed ? 'passed' : 'failed', 'detail' => $detail];
+        };
+        // For a check whose answer is not simply pass or fail: not_applicable,
+        // or not_verified when a rehearsal cannot exercise it.
+        $record = static function (string $key, string $label, array $outcome) use (&$checks): void {
+            $checks[] = ['key' => $key, 'label' => $label, 'status' => $outcome['status'], 'detail' => $outcome['detail']];
         };
 
         switch ($scenario) {
@@ -369,13 +377,13 @@ final class AiAgentService
                     $hasFailure
                         ? 'An on_failure branch exists.'
                         : 'No failure branch, so an outage would leave the caller mid-flow.');
-                $check('no_local_fallback', 'Does not record a booking locally on failure', true,
-                    'Voice has no local event or contact table to fall back to; a failed write is reported, never stored here.');
+                $record('no_local_fallback', 'Does not record a booking locally on failure',
+                    self::externalWriteCheck($ctx, $flow, 'api_unavailable'));
                 break;
 
             case 'duplicate_tool_call':
-                $check('idempotent_external_writes', 'The same action twice creates one record', true,
-                    'Every external write carries a correlation id used as the owner’s idempotency key, and an unconfirmed write is reconciled rather than resent.');
+                $record('idempotent_external_writes', 'The same action twice creates one record',
+                    self::externalWriteCheck($ctx, $flow, 'duplicate_tool_call'));
                 break;
 
             case 'asks_for_human':
@@ -393,8 +401,10 @@ final class AiAgentService
                 $disclosed = (bool) $settings['recording_disclosure'];
                 $check('recording_disclosed', 'Tells the caller the call is recorded', $disclosed,
                     $disclosed ? 'Recording disclosure is on.' : 'Recording disclosure is off for this company.');
-                $check('refusal_recorded', 'A refusal is recorded and stops recording', true,
-                    'consent_state on the call records a refusal, and recording_state moves to "refused".');
+                $record('refusal_recorded', 'A refusal is recorded and stops recording', [
+                    'status' => 'not_verified',
+                    'detail' => 'Not exercised by a rehearsal: only a live call can show recording stopping. On a call, consent_state records the refusal and recording_state moves to "refused".',
+                ]);
                 break;
 
             case 'conflicting_details':
@@ -423,6 +433,51 @@ final class AiAgentService
         }
 
         return $checks;
+    }
+
+    /**
+     * What the flow's writes into other products do when the same action
+     * comes twice, or when the owner stops answering — found out by running
+     * Voice's own executor against a stand-in for the owner, not asserted.
+     *
+     * @param array<string, mixed>|null $flow
+     * @return array{status: string, detail: string}
+     */
+    private static function externalWriteCheck(Context $ctx, ?array $flow, string $scenario): array
+    {
+        if ($flow === null) {
+            return ['status' => 'failed', 'detail' => 'This agent has no call flow attached.'];
+        }
+
+        $writes = [];
+        foreach ($flow['nodes'] ?? [] as $node) {
+            $action = is_array($node) && ($node['type'] ?? '') === 'api_action' ? (string) ($node['action'] ?? '') : '';
+            if (in_array($action, AiActions::WRITES, true)) {
+                $writes[$action] = true;
+            }
+        }
+        if ($writes === []) {
+            return ['status' => 'not_applicable', 'detail' => $scenario === 'api_unavailable'
+                ? 'This flow writes nothing into another product, so there is no write to fall back from.'
+                : 'This flow writes nothing into another product, so there is nothing to repeat.'];
+        }
+
+        $cannot = array_values(array_filter(array_keys($writes), static fn (string $a): bool => AiActions::GATED[$a]['executor'] === null));
+        if ($cannot !== []) {
+            return ['status' => 'failed', 'detail' => implode(', ', array_map(
+                static fn (string $a): string => '"' . (AiClient::TOOLS[$a]['label'] ?? $a) . '"',
+                $cannot,
+            )) . ' cannot run from a call in this deployment: nothing carries it out, so a caller reaching that step is handed to a person. Remove the step.'];
+        }
+
+        // Booking (Appointments) is the one write with an executor.
+        $outcome = AppointmentsBooking::rehearse($ctx, $scenario);
+        $off = AiActions::unavailableReason('create_booking');
+
+        return $off === null ? $outcome : [
+            'status' => $outcome['status'],
+            'detail' => $outcome['detail'] . ' Appointments is not connected in this deployment, so this flow cannot be published yet.',
+        ];
     }
 
     /**

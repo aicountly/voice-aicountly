@@ -18,6 +18,8 @@ use Aicountly\Api\Telephony\Capability;
  *   - A loop with no bound leaves a caller in an IVR that never ends.
  *   - A missing timeout means a caller who says nothing waits forever.
  *   - An action the provider cannot perform fails at the moment it is needed.
+ *   - An action nothing in this deployment carries out (AiActions) ends with
+ *     the agent claiming a booking or a cancellation that never happened.
  *   - An action the AI agent is not permitted to take is a refusal mid-call.
  *
  * Publishing is refused while any ERROR stands. Warnings are surfaced and do
@@ -163,6 +165,14 @@ final class FlowValidator
                 if ($action === '') {
                     $errors[] = self::issue('action_unset', $id, 'This step does not say which action to take.');
                 } else {
+                    // Something has to carry the action out. A step nothing
+                    // executes ends with the agent telling a caller it was
+                    // done when it was not.
+                    $unavailable = AiActions::unavailableReason($action);
+                    if ($unavailable !== null) {
+                        $errors[] = self::issue('action_unavailable', $id, $unavailable);
+                    }
+
                     $permission = $actionPermissions[$action] ?? 'denied';
                     if ($permission === 'denied') {
                         $errors[] = self::issue(

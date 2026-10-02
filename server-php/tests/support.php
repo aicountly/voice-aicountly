@@ -379,3 +379,78 @@ function lastDiaryOperation(int $callbackId): ?array
         ['id' => $callbackId],
     );
 }
+
+// ---------------------------------------------------------------------------
+// The Appointments stub (tests/stub/appointments_v1.php) — a file database the
+// stub server and the tests share, like Calendar's.
+// ---------------------------------------------------------------------------
+
+/** @return array<string, mixed> services, offers, bookings, idempotency, log */
+function appointmentsStub(): array
+{
+    $raw = @file_get_contents(__DIR__ . '/stub/state/appointments.json');
+    $db = is_string($raw) ? json_decode($raw, true) : null;
+
+    return (is_array($db) ? $db : []) + ['services' => [], 'offers' => [], 'bookings' => [], 'idempotency' => [], 'log' => [], 'seq' => 1000];
+}
+
+/** @param array<string, mixed> $db */
+function appointmentsStubSave(array $db): void
+{
+    @mkdir(__DIR__ . '/stub/state', 0777, true);
+    file_put_contents(__DIR__ . '/stub/state/appointments.json', json_encode($db, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), LOCK_EX);
+}
+
+/**
+ * What Voice sent Appointments, oldest first.
+ *
+ * @return list<array<string, mixed>>
+ */
+function appointmentsRequests(?string $method = null, ?string $path = null): array
+{
+    return array_values(array_filter(
+        appointmentsStub()['log'],
+        static fn (array $r): bool => ($method === null || $r['method'] === $method) && ($path === null || $r['path'] === $path),
+    ));
+}
+
+/** A service Appointments offers in a company. @param array<string, mixed> $extra */
+function appointmentsSeedService(int $cmpId, array $extra = []): string
+{
+    $db = appointmentsStub();
+    $uuid = $extra['service_uuid'] ?? Uuid::v4();
+    $db['services'][$uuid] = $extra + [
+        'service_uuid' => $uuid, 'cmp_id' => $cmpId, 'name' => 'Consultation', 'duration_minutes' => 30,
+        'is_active' => true, 'is_bookable_online' => true, 'deposit_required' => false, 'deposit_minor' => null,
+        'requires_confirmation' => false,
+    ];
+    appointmentsStubSave($db);
+
+    return $uuid;
+}
+
+/** A time Appointments would offer for a service with a practitioner. */
+function appointmentsSeedOffer(string $serviceUuid, string $memberUuid, string $startIso): void
+{
+    $db = appointmentsStub();
+    $db['offers'][] = ['service_uuid' => $serviceUuid, 'member_uuid' => $memberUuid, 'starts_at' => $startIso];
+    appointmentsStubSave($db);
+}
+
+/** A booking somebody else already holds. */
+function appointmentsSeedBooking(int $cmpId, string $serviceUuid, string $memberUuid, string $startIso, string $phone = '+919811100000'): string
+{
+    $db = appointmentsStub();
+    $uuid = Uuid::v4();
+    $db['seq']++;
+    $db['bookings'][$uuid] = [
+        'booking_uuid' => $uuid, 'cmp_id' => $cmpId, 'reference' => 'APT-' . $db['seq'], 'status' => 'CONFIRMED',
+        'service_uuid' => $serviceUuid, 'member_uuid' => $memberUuid, 'starts_at' => $startIso,
+        'ends_at' => gmdate('Y-m-d\\TH:i:s\\Z', (int) strtotime($startIso) + 1800), 'timezone' => 'Asia/Kolkata',
+        'booking_source' => 'STAFF_BOOKING', 'client_name' => 'Someone Else', 'client_phone' => $phone,
+        'client_email' => '', 'contact_uuid' => null, 'internal_notes' => '', 'calendar_state' => 'synced',
+    ];
+    appointmentsStubSave($db);
+
+    return $uuid;
+}

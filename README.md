@@ -122,6 +122,17 @@ confirmation. An action outside the allowlist is denied whatever the
 configuration says. A transcript is untrusted input: a caller saying "ignore your
 previous instructions" is a caller saying an odd sentence.
 
+An action step is only publishable when something carries it out
+(`src/Domain/AiActions.php`). Booking runs through Aicountly Appointments, which
+owns every customer booking (`src/Domain/AppointmentsBooking.php`, behind
+`VOICE_APPOINTMENTS_ENABLED`, off by default): the agent says "booked" only with
+Appointments' booking id and reference in hand, one Idempotency-Key per intent,
+and a lost answer is read back rather than resent blind. Moving or cancelling a
+booking, payment links and tasks have no supported executor yet — such steps do
+not publish, and an agent that reaches one creates a callback and says it is
+passing the request to the team. The Voice Gateway runs these steps through
+`POST /v1/calls/{id}/ai-actions` (docs/DEPLOYMENT.md, "Aicountly Appointments").
+
 ### Policies are the business's, not this product's claims
 
 Recording disclosure, AI disclosure, calling windows, suppression and retention
@@ -210,7 +221,7 @@ second line of defence behind it.
 ## Tests
 
 ```bash
-server-php/tests/run.sh      # 338 assertions against a real PostgreSQL
+server-php/tests/run.sh      # 390 assertions against a real PostgreSQL
 cd web && npm run test:ui    # frontend unit tests
 ```
 

@@ -46,6 +46,7 @@ final class Audit
     public const CAMPAIGN_CANCELLED   = 'voice.campaign.cancelled';
     public const AI_PUBLISHED         = 'voice.ai.published';
     public const AI_ROLLED_BACK       = 'voice.ai.rolled_back';
+    public const AI_ACTION            = 'voice.ai.action';
     public const PROVIDER_CONFIGURED  = 'voice.provider.configured';
     public const RETENTION_CHANGED    = 'voice.retention.changed';
     public const SETTINGS_CHANGED     = 'voice.settings.changed';

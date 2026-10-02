@@ -282,7 +282,8 @@ export interface AiTestSummary {
 export interface AiCheck {
   key: string
   label: string
-  status: 'passed' | 'failed' | 'not_applicable'
+  /** `not_verified`: a rehearsal could not exercise it, so it is not a pass. */
+  status: 'passed' | 'failed' | 'not_applicable' | 'not_verified'
   detail: string
 }
 
@@ -375,7 +376,11 @@ export interface IntegrationStatus {
   app: string
   label: string
   purpose?: string
-  status: 'not_configured' | 'configured' | 'connected' | 'degraded' | 'unavailable' | 'forbidden'
+  /**
+   * `enabled_unverified`: switched on, but no authenticated probe has proved
+   * Voice's key — the Command Centre never says "connected" from a flag alone.
+   */
+  status: 'not_configured' | 'configured' | 'enabled_unverified' | 'connected' | 'degraded' | 'unavailable' | 'forbidden'
   reason: string | null
   checked_at: string | null
   last_ok_at: string | null

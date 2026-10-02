@@ -25,12 +25,17 @@ declare(strict_types=1);
  *     outcome is never turned into "failed". Attempts Calendar refused before
  *     acting (deferred: key, scope, schema) are sent again unchanged, or
  *     dropped unsent when the callback has moved on. See Domain\CallbackDiary.
+ *
+ *     Appointments (an AI agent's booking) the same way: read back what it
+ *     holds at that time for that service and number, adopt it, or send the
+ *     same attempt again under the same key. See Domain\AppointmentsBooking.
  */
 
 namespace Aicountly\Api;
 
 use Aicountly\Api\Clients\CrmClient;
 use Aicountly\Api\Clients\PayClient;
+use Aicountly\Api\Domain\AppointmentsBooking;
 use Aicountly\Api\Domain\CallbackDiary;
 use Aicountly\Api\Domain\CallStateMachine;
 
@@ -49,12 +54,14 @@ foreach (ExternalOperations::dueForReconcile(50) as $operation) {
     $correlationId = (string) $operation['correlation_id'];
     $targetApp = (string) $operation['target_app'];
 
-    if ($targetApp === 'calendar') {
+    if ($targetApp === 'calendar' || $targetApp === AppointmentsBooking::TARGET) {
         try {
-            $outcome = CallbackDiary::recover($operation);
+            $outcome = $targetApp === 'calendar'
+                ? CallbackDiary::recover($operation)
+                : AppointmentsBooking::recover($operation);
         } catch (\Throwable $e) {
             // One bad row must not stop the rest; it is asked again later.
-            error_log('[call-recovery] calendar operation ' . (int) $operation['operation_id'] . ': ' . $e->getMessage());
+            error_log('[call-recovery] ' . $targetApp . ' operation ' . (int) $operation['operation_id'] . ': ' . $e->getMessage());
             try {
                 ExternalOperations::retryLater((int) $operation['operation_id'], (int) $operation['attempts'] + 1);
             } catch (\Throwable) {
