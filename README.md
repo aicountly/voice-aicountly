@@ -210,7 +210,7 @@ second line of defence behind it.
 ## Tests
 
 ```bash
-server-php/tests/run.sh      # 327 assertions against a real PostgreSQL
+server-php/tests/run.sh      # 338 assertions against a real PostgreSQL
 cd web && npm run test:ui    # frontend unit tests
 ```
 
