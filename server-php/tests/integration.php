@@ -362,6 +362,9 @@ T::group('8. Provider capability restrictions');
     // A company with no connection can do nothing, and says so clearly.
     $emptyCtx = Context::forCompany(4999);
     Context::trustForTesting(4999, $owner);
+    // A wide-open window, so this checks the provider refusal and not the
+    // time of day the suite happens to run at.
+    seedSettings(4999);
     $nullAdapter = ProviderRegistry::forCompany($emptyCtx);
     T::same('null', $nullAdapter->key(), 'a company with no connection gets the null adapter');
     T::ok(!$nullAdapter->capabilities()[Capability::PLACE_CALL], 'which reports no capabilities at all');
