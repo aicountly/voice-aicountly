@@ -116,7 +116,8 @@ export default function Callbacks() {
                         {callback.due_at ? ` · due ${formatDateTime(callback.due_at, timezone)}` : ' · no due time'}
                         {callback.due_at && callback.exact_time ? ' (time promised to the caller)' : ''}
                         {callback.attempts > 0 ? ` · ${callback.attempts} of ${callback.max_attempts} attempts` : ''}
-                        {callback.calendar.state !== 'none' || callback.calendar.detail ? (
+                        {/* Optional: an API deployed a moment before this page has no `calendar` yet. */}
+                        {callback.calendar && (callback.calendar.state !== 'none' || callback.calendar.detail) ? (
                           <span style={{ display: 'block', marginTop: 2 }}>
                             <CalendarClock size={11} aria-hidden="true" style={{ verticalAlign: -1, marginRight: 3 }} />
                             {[DIARY_LABEL[callback.calendar.state], callback.calendar.detail].filter(Boolean).join(' — ')}
@@ -246,7 +247,7 @@ function NewCallback({ calendar, timezone, onClose, onCreated }: {
         </label>
         <p className="vmuted vsmall" style={{ margin: 0 }}>
           {calendarOff
-            ? `Aicountly Calendar is not connected to Voice in this deployment, so no diary entry can be made.${calendar?.reason ? ` ${calendar.reason}` : ''}`
+            ? `No diary entry can be made in this deployment: ${calendar?.reason ?? 'Aicountly Calendar is not connected to Voice.'}`
             : 'Voice adds a 15-minute busy entry, titled only with this callback’s reference (for example “Callback · #42”), to your diary — or to the assigned agent’s, if one is assigned. The phone number, the caller and the reason stay in Voice. Voice moves or cancels the entry when this callback is rescheduled, reassigned or cancelled here; it cannot be moved from Calendar. It is not a reminder: Voice sends none.'}
         </p>
 

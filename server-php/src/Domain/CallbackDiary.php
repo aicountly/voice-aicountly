@@ -84,6 +84,39 @@ final class CallbackDiary
 
     private const OPEN = [ExternalOperations::PENDING, ExternalOperations::UNKNOWN, ExternalOperations::DEFERRED];
 
+    /** Why there can be no diary entry while migration 010 has not run. */
+    public const SCHEMA_MISSING_REASON = 'Voice’s database is missing migration 010_voice_callback_diary.sql; an administrator needs to run php bin/migrate.php.';
+
+    /** What a person who asked for an entry is told meanwhile. */
+    public const SCHEMA_MISSING = 'No diary entry was made: ' . self::SCHEMA_MISSING_REASON;
+
+    private static ?bool $schemaReady = null;
+
+    /**
+     * Has migration 010 run here?
+     *
+     * Asked once per process. Until it has, callbacks work exactly as before
+     * and every diary path says plainly that it cannot run, rather than
+     * failing the callback with an SQL error.
+     */
+    public static function schemaReady(): bool
+    {
+        return self::$schemaReady ??= (int) Db::scalar(
+            "SELECT COUNT(*) FROM information_schema.columns
+              WHERE table_schema = ANY (current_schemas(false))
+                AND ((table_name = 'voice_callbacks' AND column_name = 'calendar_requested')
+                  OR (table_name = 'voice_external_operations' AND column_name = 'request_body'))",
+        ) === 2;
+    }
+
+    /** CLI only: forget the answer, for a test that changes the schema under it. */
+    public static function forgetSchemaForTesting(): void
+    {
+        if (PHP_SAPI === 'cli') {
+            self::$schemaReady = null;
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Keeping the entry true
     // -----------------------------------------------------------------------
@@ -101,6 +134,10 @@ final class CallbackDiary
      */
     public static function sync(Context $ctx, int $callbackId, array $changed = [], ?string $actor = null): array
     {
+        if (!self::schemaReady()) {
+            return ['state' => 'none', 'message' => self::SCHEMA_MISSING];
+        }
+
         for ($step = 0; $step < self::MAX_STEPS; $step++) {
             $row = CallbackService::row($ctx, $callbackId);
             if ($row === null) {
@@ -284,7 +321,7 @@ final class CallbackDiary
         $ignore = [];
         if ($row !== null && self::str($row['calendar_event_ref'] ?? null) !== null
             && self::str($row['calendar_owner_uuid'] ?? null) === $owner['uuid']
-            && $row['calendar_state'] !== self::CANCELLED) {
+            && ($row['calendar_state'] ?? null) !== self::CANCELLED) {
             $ignore[] = (string) $row['calendar_event_ref'];
         }
 

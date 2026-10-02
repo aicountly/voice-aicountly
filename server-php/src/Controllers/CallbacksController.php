@@ -57,8 +57,9 @@ final class CallbacksController extends Controller
                 'calendar' => [
                     // Configured, not proven: Integrations probes whether
                     // Calendar accepts Voice's key.
-                    'enabled' => Features::enabled('CALENDAR'),
-                    'reason'  => Features::explain('CALENDAR'),
+                    'enabled' => Features::enabled('CALENDAR') && CallbackDiary::schemaReady(),
+                    'reason'  => Features::explain('CALENDAR')
+                        ?? (CallbackDiary::schemaReady() ? null : CallbackDiary::SCHEMA_MISSING_REASON),
                 ],
             ],
         );

@@ -48,8 +48,14 @@ final class CallbackService
 
         $dueAt = self::dueAt($ctx, $input['due_at'] ?? null);
         $wantsDiary = !empty($input['create_calendar_event']);
+        // Before migration 010 a callback is saved exactly as it always was;
+        // only the diary entry is refused, and says why.
+        $diaryColumns = CallbackDiary::schemaReady() ? [
+            'exact_time'         => $dueAt !== null && !empty($input['exact_time']),
+            'calendar_requested' => $wantsDiary,
+        ] : [];
 
-        $callbackId = (int) Db::insert('voice_callbacks', [
+        $callbackId = (int) Db::insert('voice_callbacks', $diaryColumns + [
             'cmp_id'         => $ctx->cmpId,
             'bo_id'          => $ctx->boId,
             'source_call_id' => isset($input['source_call_id']) ? (int) $input['source_call_id'] : null,
@@ -60,12 +66,10 @@ final class CallbackService
             'priority'       => in_array($input['priority'] ?? '', ['high', 'normal', 'low'], true)
                 ? (string) $input['priority'] : 'normal',
             'due_at'         => $dueAt === null ? null : Clock::sql($dueAt),
-            'exact_time'     => $dueAt !== null && !empty($input['exact_time']),
             'assigned_agent_id' => isset($input['assigned_agent_id']) ? (int) $input['assigned_agent_id'] : null,
             'queue_id'       => isset($input['queue_id']) ? (int) $input['queue_id'] : null,
             'max_attempts'   => max(1, min(10, (int) ($input['max_attempts'] ?? 3))),
             'status'         => $dueAt === null ? 'open' : 'scheduled',
-            'calendar_requested' => $wantsDiary,
             'created_by'     => $auth->uuid,
         ], 'callback_id');
 
@@ -129,13 +133,14 @@ final class CallbackService
                 $changed[] = 'assigned_agent_id';
             }
         }
-        if (array_key_exists('exact_time', $input)) {
+        $diaryReady = CallbackDiary::schemaReady();
+        if (array_key_exists('exact_time', $input) && $diaryReady) {
             $values['exact_time'] = (bool) $input['exact_time'];
             if ($values['exact_time'] !== self::flag($row['exact_time'])) {
                 $changed[] = 'exact_time';
             }
         }
-        if (array_key_exists('create_calendar_event', $input)) {
+        if (array_key_exists('create_calendar_event', $input) && $diaryReady) {
             $values['calendar_requested'] = (bool) $input['create_calendar_event'];
             if ($values['calendar_requested'] !== self::flag($row['calendar_requested'])) {
                 $changed[] = 'create_calendar_event';
@@ -145,9 +150,12 @@ final class CallbackService
         Db::update('voice_callbacks', $values, ['callback_id' => $callbackId, 'cmp_id' => $ctx->cmpId]);
 
         $message = null;
-        $diaryInvolved = self::flag($values['calendar_requested'] ?? $row['calendar_requested'])
-            || $row['calendar_event_ref'] !== null;
-        if ($changed !== [] && $diaryInvolved) {
+        if (!$diaryReady) {
+            if (!empty($input['create_calendar_event']) || $row['calendar_event_ref'] !== null) {
+                $message = CallbackDiary::SCHEMA_MISSING;
+            }
+        } elseif ($changed !== [] && (self::flag($values['calendar_requested'] ?? $row['calendar_requested'])
+            || $row['calendar_event_ref'] !== null)) {
             $message = CallbackDiary::sync($ctx, $callbackId, $changed, $auth->uuid)['message'];
         }
 

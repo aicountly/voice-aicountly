@@ -24,6 +24,7 @@ use Aicountly\Api\Crypto;
 use Aicountly\Api\Db;
 use Aicountly\Api\Domain\AiAgentService;
 use Aicountly\Api\Domain\BudgetService;
+use Aicountly\Api\Domain\CallbackDiary;
 use Aicountly\Api\Domain\CallbackService;
 use Aicountly\Api\Domain\CallingPolicy;
 use Aicountly\Api\Domain\CallService;
@@ -1883,6 +1884,53 @@ T::group('28. A callback request is claimed before it runs');
     $deadKey = 'cb-claim-' . substr(Uuid::v4(), 0, 12);
     $claim($deadKey, '10 minutes');
     T::same(201, $post(['e164' => '+919876500071'], $deadKey)['status'], 'a claim abandoned minutes ago no longer blocks');
+
+    clearHeaders();
+}
+
+// ===========================================================================
+T::group('29. Before migration 010, callbacks work and the diary says why it cannot');
+// ===========================================================================
+{
+    stubReset();
+    Auth::adopt($person);
+    Context::trustForTesting(CMP, $person);
+    $before = count(calendarRequests());
+    $seen = [];
+    try {
+        Db::transaction(static function () use (&$seen): void {
+            // The schema as it was before 010, for this transaction only.
+            Db::run('ALTER TABLE voice_callbacks
+                DROP COLUMN exact_time, DROP COLUMN calendar_requested, DROP COLUMN calendar_owner_uuid,
+                DROP COLUMN calendar_source_ref, DROP COLUMN calendar_version, DROP COLUMN calendar_ref_seq,
+                DROP COLUMN calendar_due_at, DROP COLUMN calendar_state, DROP COLUMN calendar_detail,
+                DROP COLUMN calendar_checked_at');
+            Db::run('ALTER TABLE voice_external_operations DROP COLUMN request_body');
+            CallbackDiary::forgetSchemaForTesting();
+
+            $seen['create'] = request('POST', '/v1/callbacks', ['cmp_id' => (string) CMP], [
+                'e164' => '+919876500080', 'due_at' => Clock::iso(Clock::now()->modify('+1 day')), 'create_calendar_event' => true,
+            ]);
+            $id = (int) ($seen['create']['body']['data']['callback_id'] ?? 0);
+            $seen['update'] = request('PUT', '/v1/callbacks/' . $id, ['cmp_id' => (string) CMP], ['due_at' => Clock::iso(Clock::now()->modify('+2 days'))]);
+            $seen['list'] = request('GET', '/v1/callbacks', ['cmp_id' => (string) CMP]);
+
+            throw new \RuntimeException('roll back');
+        });
+    } catch (\RuntimeException $e) {
+        // Rolled back: the columns are there again.
+    }
+    CallbackDiary::forgetSchemaForTesting();
+
+    T::same(201, $seen['create']['status'] ?? null, 'a callback is still created without the new columns');
+    T::ok(str_contains((string) ($seen['create']['body']['message'] ?? ''), 'missing migration 010'),
+        'and the diary entry it asked for is refused, naming the migration');
+    T::same(200, $seen['update']['status'] ?? null, 'it can still be rescheduled');
+    T::same([false, CallbackDiary::SCHEMA_MISSING_REASON],
+        [$seen['list']['body']['meta']['calendar']['enabled'] ?? null, $seen['list']['body']['meta']['calendar']['reason'] ?? null],
+        'the queue lists it and says diary entries are unavailable, and why');
+    T::same($before, count(calendarRequests()), 'and nothing is sent to Calendar');
+    T::ok(CallbackDiary::schemaReady(), 'with the migration in place the diary path is available again');
 
     clearHeaders();
 }

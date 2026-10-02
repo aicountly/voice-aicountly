@@ -49,6 +49,6 @@ test('the empty queue does not promise callbacks Voice never creates on its own'
 })
 
 test('a switched-off Calendar disables the option and says why', () => {
-  assert.ok(page.includes('is not connected to Voice in this deployment, so no diary entry can be made'))
+  assert.ok(page.includes('No diary entry can be made in this deployment: '))
   assert.ok(/disabled=\{calendarOff\}/.test(page))
 })
