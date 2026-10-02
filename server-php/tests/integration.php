@@ -1626,4 +1626,113 @@ T::group('29. Contacts: canonical shape, company endpoints, matchCount (G18#2, G
     stubReset();
 }
 
+// ===========================================================================
+T::group('30. Campaign worker reads Contacts through a delegation grant (I-19, G18#1)');
+// ===========================================================================
+{
+    stubReset();
+    Context::resetForTesting();
+    $ctx = scope(CMP, $owner);
+    Auth::adopt($owner);
+    seedSettings(CMP, ['campaign_approval_required' => false]);
+    $connectionId = (int) Db::scalar('SELECT connection_id FROM voice_provider_connections WHERE cmp_id = :c ORDER BY connection_id LIMIT 1', ['c' => CMP]);
+
+    $campaignId = (int) Db::insert('voice_campaigns', [
+        'cmp_id' => CMP, 'name' => 'Delegation test', 'mode' => 'preview', 'status' => 'draft',
+        'connection_id' => $connectionId, 'timezone' => 'UTC',
+        'window_start_min' => 0, 'window_end_min' => 1440, 'window_days' => [0, 1, 2, 3, 4, 5, 6],
+        'max_concurrent' => 10, 'calls_per_minute' => 10, 'max_attempts' => 1,
+        'script' => ['body' => 'Hello', 'reviewed' => true, 'audience_purpose' => 'Requested callback'],
+    ], 'campaign_id');
+    foreach (['stub-1', 'gone', 'missing', 'national'] as $ref) {
+        Db::insert('voice_campaign_audience_refs', ['campaign_id' => $campaignId, 'cmp_id' => CMP, 'source' => 'contacts', 'external_ref' => $ref], 'audience_ref_id');
+    }
+
+    putenv('CONTACTS_SERVICE_KEY');
+    $noKey = CampaignService::act($ctx, $owner, $campaignId, 'start');
+    T::ok(!$noKey['ok'] && str_contains((string) $noKey['message'], 'CONTACTS_SERVICE_KEY'),
+        'without Voice\'s Contacts product key the campaign is refused, saying which setting is missing');
+
+    putenv('CONTACTS_SERVICE_KEY=test-voice-contacts-key');
+    $service = Auth::forTesting('service:crm', 'service', 'crm');
+    Context::trustForTesting(CMP, $service);
+    $byService = CampaignService::act($ctx, $service, $campaignId, 'start');
+    T::ok(!$byService['ok'] && str_contains((string) $byService['message'], 'signed-in person'),
+        'a product key cannot start it: a grant is issued by a person');
+
+    $started = CampaignService::act($ctx, $owner, $campaignId, 'start');
+    T::ok($started['ok'], 'the owner starts it, and Contacts grants access with their session');
+    $grant = Db::first("SELECT * FROM voice_directory_grants WHERE campaign_id = :id AND status = 'active'", ['id' => $campaignId]);
+    T::ok($grant !== null && str_starts_with((string) $grant['token_enc'], 'v1.'), 'the grant is stored, encrypted');
+    T::ok($grant !== null && !str_contains((string) $grant['token_enc'], 'dlg_'), 'and the token is never stored in the clear');
+
+    $worker = static function (int $campaignId): string {
+        return (string) shell_exec('CONTACTS_SERVICE_KEY=test-voice-contacts-key php ' . escapeshellarg(__DIR__ . '/../bin/campaign-worker.php')
+            . ' --campaign=' . $campaignId . ' 2>&1');
+    };
+    $out = $worker($campaignId);
+    $attempts = [];
+    foreach (Db::all('SELECT r.external_ref, a.status, a.skip_reason, a.dialled_e164 FROM voice_campaign_attempts a
+                        JOIN voice_campaign_audience_refs r ON r.audience_ref_id = a.audience_ref_id
+                       WHERE a.campaign_id = :id', ['id' => $campaignId]) as $row) {
+        $attempts[$row['external_ref']] = $row;
+    }
+    T::same('+919876500011', $attempts['stub-1']['dialled_e164'] ?? null, 'the worker dials a company contact read through the grant');
+    T::same('contact_gone', $attempts['gone']['skip_reason'] ?? null, 'a deleted contact is skipped as contact_gone, not re-queued forever');
+    T::same('skipped', $attempts['gone']['status'] ?? null, 'and its attempt is terminal');
+    T::same('no_number', $attempts['missing']['skip_reason'] ?? null, 'a contact with no phone is skipped as no_number');
+    T::same('+919876500012', $attempts['national']['dialled_e164'] ?? null, 'a nationally stored phone is dialled as company-region E.164');
+
+    // Expiry: the worker does not use a grant past its time; it pauses.
+    $ref2 = (int) Db::insert('voice_campaign_audience_refs', ['campaign_id' => $campaignId, 'cmp_id' => CMP, 'source' => 'contacts', 'external_ref' => 'stub-7'], 'audience_ref_id');
+    Db::insert('voice_campaign_attempts', ['campaign_id' => $campaignId, 'audience_ref_id' => $ref2, 'cmp_id' => CMP, 'attempt_no' => 1, 'status' => 'queued'], 'attempt_id');
+    Db::run("UPDATE voice_campaigns SET status = 'running' WHERE campaign_id = :id", ['id' => $campaignId]);
+    Db::run("UPDATE voice_directory_grants SET expires_at = NOW() - INTERVAL '1 minute' WHERE campaign_id = :id AND status = 'active'", ['id' => $campaignId]);
+    $worker($campaignId);
+    $campaign = Db::first('SELECT status, status_reason FROM voice_campaigns WHERE campaign_id = :id', ['id' => $campaignId]);
+    T::same('paused', $campaign['status'] ?? null, 'an expired grant pauses the campaign');
+    T::ok(str_starts_with((string) ($campaign['status_reason'] ?? ''), 'directory_access_expired'), 'with the reason, for a person to act on');
+    T::same('queued', Db::scalar('SELECT status FROM voice_campaign_attempts WHERE audience_ref_id = :r', ['r' => $ref2]),
+        'and the attempt is put back, not consumed');
+
+    // Renewal: resuming is the person's moment to renew.
+    $resumed = CampaignService::act($ctx, $owner, $campaignId, 'resume');
+    T::ok($resumed['ok'], 'the owner resumes it');
+    T::same(1, (int) Db::scalar("SELECT COUNT(*) FROM voice_directory_grants WHERE campaign_id = :id AND status = 'active'", ['id' => $campaignId]),
+        'which issues a fresh grant (exactly one active)');
+    $worker($campaignId);
+    T::same('dialling', Db::scalar('SELECT status FROM voice_campaign_attempts WHERE audience_ref_id = :r', ['r' => $ref2]),
+        'and the worker carries on with it');
+
+    // Refusal: Contacts says the grant is no longer valid (revoked, person left).
+    $ref3 = (int) Db::insert('voice_campaign_audience_refs', ['campaign_id' => $campaignId, 'cmp_id' => CMP, 'source' => 'contacts', 'external_ref' => 'stub-8'], 'audience_ref_id');
+    Db::insert('voice_campaign_attempts', ['campaign_id' => $campaignId, 'audience_ref_id' => $ref3, 'cmp_id' => CMP, 'attempt_no' => 1, 'status' => 'queued'], 'attempt_id');
+    Db::run("UPDATE voice_directory_grants SET token_enc = :t WHERE campaign_id = :id AND status = 'active'",
+        ['t' => \Aicountly\Api\Crypto::encrypt('dlg_expired'), 'id' => $campaignId]);
+    $worker($campaignId);
+    $campaign = Db::first('SELECT status, status_reason FROM voice_campaigns WHERE campaign_id = :id', ['id' => $campaignId]);
+    T::same('paused', $campaign['status'] ?? null, 'a grant Contacts refuses (401 delegation_invalid) pauses the campaign');
+    T::ok(str_starts_with((string) ($campaign['status_reason'] ?? ''), 'directory_access_invalid'), 'saying access was refused');
+    T::same(0, (int) Db::scalar("SELECT COUNT(*) FROM voice_directory_grants WHERE campaign_id = :id AND status = 'active'", ['id' => $campaignId]),
+        'and the refused grant is retired');
+
+    // Outage: bounded, backed-off, counted — and it ends.
+    CampaignService::act($ctx, $owner, $campaignId, 'resume');
+    stubMode('contacts', 'down');
+    $worker($campaignId);
+    $row = Db::first('SELECT status, defer_count, scheduled_for > NOW() AS later FROM voice_campaign_attempts WHERE audience_ref_id = :r', ['r' => $ref3]);
+    T::same('queued', $row['status'] ?? null, 'a Contacts outage defers the attempt');
+    T::same(1, (int) ($row['defer_count'] ?? 0), 'counts the deferral');
+    T::ok(in_array($row['later'] ?? null, [true, 't', 1, '1'], true), 'and backs off into the future');
+    Db::run('UPDATE voice_campaign_attempts SET defer_count = :n, scheduled_for = NOW() WHERE audience_ref_id = :r', ['n' => CampaignService::MAX_DEFERRALS, 'r' => $ref3]);
+    $worker($campaignId);
+    $row = Db::first('SELECT status, skip_reason FROM voice_campaign_attempts WHERE audience_ref_id = :r', ['r' => $ref3]);
+    T::same('directory_unavailable', $row['skip_reason'] ?? null, 'after the last deferral it is skipped as directory_unavailable, not looped');
+    stubReset();
+
+    T::same(0, (int) Db::scalar("SELECT COUNT(*) FROM voice_campaign_attempts WHERE campaign_id = :id AND status = 'queued'", ['id' => $campaignId]),
+        'nothing is left queued: every attempt was dialled, skipped with a reason, or ended');
+    putenv('CONTACTS_SERVICE_KEY');
+}
+
 exit(T::summary());

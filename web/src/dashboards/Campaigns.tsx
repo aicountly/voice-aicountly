@@ -114,6 +114,9 @@ export default function Campaigns() {
                             <td className="vtable__num">{campaign.connected ?? 0}</td>
                             <td>
                               <StatusPill status={campaign.status} />
+                              {campaign.status === 'paused' && campaign.status_reason ? (
+                                <small style={{ color: 'var(--warning)' }}>{campaign.status_reason}</small>
+                              ) : null}
                               {campaign.blocking && campaign.blocking.length > 0 ? (
                                 <small style={{ color: 'var(--warning)' }}>
                                   {campaign.blocking.length} check{campaign.blocking.length === 1 ? '' : 's'} outstanding
@@ -236,7 +239,21 @@ function CampaignActions({ campaign, canLaunch, pending, onAct }: {
         <Button size="sm" icon={Pause} onClick={() => onAct('pause')} disabled={pending}>Pause</Button>
       ) : null}
       {campaign.status === 'paused' ? (
-        <Button size="sm" icon={Play} onClick={() => onAct('resume')} disabled={pending}>Resume</Button>
+        <Button
+          size="sm"
+          icon={Play}
+          onClick={() => onAct('resume')}
+          disabled={pending}
+          title={campaign.status_reason ?? 'Resuming also renews the campaign’s read access to Aicountly Contacts.'}
+        >
+          Resume
+        </Button>
+      ) : null}
+      {campaign.status === 'running' ? (
+        <Button size="sm" onClick={() => onAct('renew_access')} disabled={pending}
+          title="Renew the campaign’s read access to Aicountly Contacts, granted with your session">
+          Renew Contacts access
+        </Button>
       ) : null}
       {['draft', 'ready', 'scheduled'].includes(campaign.status) ? (
         <Button

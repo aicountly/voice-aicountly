@@ -245,6 +245,14 @@ final class CampaignsController extends Controller
             return $count;
         });
 
+        // Configuring a Contacts audience is a moment a person is present: get
+        // (or refresh) the worker's Contacts grant now, best effort. Start and
+        // resume insist on it; here a failure is only reported.
+        $directoryAccess = null;
+        if ($source === 'contacts') {
+            $directoryAccess = \Aicountly\Api\Domain\ContactsDelegation::issueForCampaign($ctx, $auth, $campaignId, true);
+        }
+
         // The readiness state is now stale; recompute it.
         $validation = CampaignService::validate($ctx, $campaignId);
 
@@ -253,6 +261,7 @@ final class CampaignsController extends Controller
             'source'        => $source,
             'note'          => 'Stored as references. Numbers and eligibility are read from the owning product when each call is dialled.',
             'readiness'     => $validation,
+            'directory_access' => $directoryAccess,
         ]);
     }
 

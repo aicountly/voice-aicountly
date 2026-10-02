@@ -204,9 +204,21 @@ second line of defence behind it.
 ## Tests
 
 ```bash
-server-php/tests/run.sh      # 203 assertions against a real PostgreSQL
+server-php/tests/run.sh      # the integration suite against a real PostgreSQL
 cd web && npm run test:ui    # frontend unit tests
 ```
+
+Against the REAL Contacts, Manage and my.aicountly handlers (the e2e harness at
+`/home/user/e2e`, see its README), not a stub:
+
+```bash
+/home/user/e2e/bin/with-stack.sh --agent vm -- php server-php/tests/contacts-conformance.php
+/home/user/e2e/bin/with-stack.sh --agent vm -- php server-php/tests/e2e-campaign-worker.php <gateway stub port>
+```
+
+The Contacts client is the shared one, vendored from contacts-react-app
+(`server-php/src/Clients/vendor-contacts-client/`); keep it identical with
+`scripts/ci/contacts-client-drift-check.sh <file>`.
 
 The suite drives the real controllers through the real router with an adopted
 identity, so permission checks are exercised rather than bypassed. A local stub
