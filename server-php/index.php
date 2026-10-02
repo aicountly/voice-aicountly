@@ -134,6 +134,14 @@ if ($method === 'OPTIONS') {
     exit;
 }
 
+// The environment is configuration (see Environment); the Host header only
+// gets to make us REFUSE, never to choose. A sandbox name on a production
+// server is a probe or a mis-copied .env, and either way nothing here should
+// answer it.
+if (Environment::hostContradicts((string) ($_SERVER['HTTP_HOST'] ?? ''))) {
+    Http::error(503, 'environment_mismatch', 'This server is not configured for the host it was asked for.');
+}
+
 $uri = (string) (parse_url((string) ($_SERVER['REQUEST_URI'] ?? '/'), PHP_URL_PATH) ?: '/');
 
 // Strip the directory this front controller is mounted under, so the same file

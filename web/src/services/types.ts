@@ -39,6 +39,9 @@ export interface Call {
   local_e164: string | null
   /** Aicountly Contacts' id. The name is read from Contacts, never stored here. */
   contact_ref: string | null
+  /** What a company lookup in Contacts found; null/not_attempted = nobody has looked yet. */
+  contact_lookup_state?: 'not_attempted' | 'matched' | 'no_match' | 'ambiguous' | 'unavailable' | 'forbidden' | null
+  contact_lookup_matches?: number | null
   crm_lead_ref: string | null
   campaign_id: number | null
   queue_id: number | null
@@ -452,6 +455,10 @@ export interface VoiceSettings {
   campaign_approval_required: boolean
   max_concurrent_calls: number
   wrap_up_seconds: number
+  /** Region national numbers are read in; null = the server default. */
+  default_phone_region: string | null
+  effective_phone_region?: string
+  supported_phone_regions?: string[]
   configured: boolean
   can_edit?: boolean
   policy_note?: string
@@ -462,6 +469,10 @@ export interface AccessInfo {
   granted: string[]
   grantable: string[]
   profiles: Array<{ profile_id: number; name: string; description: string; permissions: string[]; is_active: boolean }>
+  /** Manage's answer for this company (companyinfo), never the portal session. */
+  is_owner?: boolean
+  owner_source?: string
+  assignments?: Array<{ profile_id: number; user_uuid: string; created_at: string; created_by: string | null }>
   note: string
 }
 

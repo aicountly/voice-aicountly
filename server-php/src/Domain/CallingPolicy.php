@@ -6,8 +6,10 @@ namespace Aicountly\Api\Domain;
 
 use Aicountly\Api\Context;
 use Aicountly\Api\Db;
+use Aicountly\Api\Env;
 use Aicountly\Api\Settings;
 use Aicountly\Api\Support\Clock;
+use Aicountly\Api\Support\PhoneNumber;
 use DateTimeImmutable;
 
 /**
@@ -41,7 +43,7 @@ final class CallingPolicy
      */
     public static function check(Context $ctx, string $e164, ?DateTimeImmutable $at = null): array
     {
-        $number = self::normalise($e164);
+        $number = self::normaliseFor($ctx, $e164);
         if ($number === null) {
             return [
                 'allowed' => false,
@@ -88,7 +90,7 @@ final class CallingPolicy
     /** Add a number to the suppression list. Idempotent — asking twice is still one entry. */
     public static function suppress(Context $ctx, string $e164, string $reason, string $source, ?string $actor = null): void
     {
-        $number = self::normalise($e164);
+        $number = self::normaliseFor($ctx, $e164);
         if ($number === null) {
             return;
         }
@@ -176,22 +178,45 @@ final class CallingPolicy
      * E.164, or null.
      *
      * Deliberately strict. A number this cannot normalise is a number the
-     * carrier will reject, and finding that out here is cheaper than finding it
-     * out on the trunk.
+     * carrier will reject — or, worse, a different number. National numbers
+     * need a region: without one only `+CC…` / `00CC…` forms are accepted. The
+     * old rule put '+' in front of any digit string, which turned the Indian
+     * mobile 9876543210 into +9876543210, another country (G18#6).
      */
-    public static function normalise(string $raw): ?string
+    public static function normalise(string $raw, ?string $region = null): ?string
     {
-        $digits = preg_replace('/[^0-9+]/', '', trim($raw)) ?? '';
-        if ($digits === '') {
-            return null;
+        return PhoneNumber::toE164($raw, $region);
+    }
+
+    /** E.164 for this company: national numbers are read in its region (see regionFor). */
+    public static function normaliseFor(Context $ctx, string $raw, ?string $preferredRegion = null): ?string
+    {
+        return PhoneNumber::toE164($raw, self::regionFor($ctx, $preferredRegion));
+    }
+
+    /**
+     * The region national numbers are read in, for this company.
+     *
+     * In order: a region the caller has good reason to prefer (the country of
+     * the business number a call is placed from), this company's
+     * `default_phone_region` setting, the server's VOICE_DEFAULT_PHONE_REGION,
+     * then IN — the order Contacts uses for the phones it stores, so a number
+     * typed nationally here and one stored in Contacts land on the same E.164.
+     */
+    public static function regionFor(Context $ctx, ?string $preferred = null): string
+    {
+        foreach ([
+            $preferred,
+            Settings::forCompany($ctx->cmpId)['default_phone_region'] ?? null,
+            Env::get('VOICE_DEFAULT_PHONE_REGION'),
+        ] as $candidate) {
+            $region = PhoneNumber::region(is_string($candidate) ? $candidate : null);
+            if ($region !== null) {
+                return $region;
+            }
         }
 
-        if (!str_starts_with($digits, '+')) {
-            $digits = '+' . ltrim($digits, '+');
-        }
-
-        // + then 8–15 digits, which is E.164's own bound.
-        return preg_match('/^\+[1-9][0-9]{7,14}$/', $digits) === 1 ? $digits : null;
+        return 'IN';
     }
 
     /**

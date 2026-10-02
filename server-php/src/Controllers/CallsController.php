@@ -274,4 +274,22 @@ final class CallsController extends Controller
             ['cmp' => $ctx->cmpId],
         ));
     }
+
+    /**
+     * Who is calling? A COMPANY lookup in Aicountly Contacts with the viewing
+     * agent's own session; links a contact only on exactly one match that holds
+     * the number (G18#4). The name is returned for display and never stored.
+     */
+    public static function identify(string $id): never
+    {
+        [$auth, $ctx] = self::enter('voice.call.view');
+        $callId = self::id($id);
+
+        $result = \Aicountly\Api\Domain\InboundCalls::identify($ctx, $auth, $callId);
+        if ($result['state'] === 'not_found') {
+            Http::notFound((string) $result['message']);
+        }
+
+        Http::data($result + ['source' => 'contacts', 'scope' => 'company']);
+    }
 }

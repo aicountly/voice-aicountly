@@ -34,6 +34,7 @@ use Aicountly\Api\Domain\BudgetService;
 use Aicountly\Api\Domain\CallingPolicy;
 use Aicountly\Api\Domain\CallService;
 use Aicountly\Api\Domain\CampaignService;
+use Aicountly\Api\Domain\ContactsDelegation;
 use Aicountly\Api\Support\Clock;
 
 require __DIR__ . '/../src/Autoload.php';
@@ -108,7 +109,18 @@ foreach ($campaigns as $campaign) {
         continue;
     }
 
+    // Contacts is read through the grant a person issued for this campaign
+    // (ContactsDelegation) — never with an empty session. Fetched once per pass.
+    $contactsClient = null;
+    $paused = false;
+
     foreach (CampaignService::claimBatch($campaignId, $headroom) as $attempt) {
+        if ($paused) {
+            // The campaign was paused mid-batch: give the claim back untouched.
+            Db::update('voice_campaign_attempts', ['status' => 'queued'], ['attempt_id' => (int) $attempt['attempt_id']]);
+            continue;
+        }
+
         $audience = Db::first(
             'SELECT * FROM voice_campaign_audience_refs WHERE audience_ref_id = :id',
             ['id' => (int) $attempt['audience_ref_id']],
@@ -119,22 +131,57 @@ foreach ($campaigns as $campaign) {
             continue;
         }
 
-        // LIVE. The number comes from the owning product now, not from a copy.
-        $resolved = CampaignService::resolveNumber($ctx, $auth, $audience);
-        if (!$resolved['ok']) {
-            // "The directory is down" is not "this person has no number": the
-            // first is retried, the second is not.
-            $status = $resolved['reason'] === 'owner_unavailable' ? 'queued' : 'skipped';
-            if ($status === 'queued') {
-                Db::update('voice_campaign_attempts', [
-                    'status'        => 'queued',
-                    'scheduled_for' => Clock::sql(Clock::now()->modify('+10 minutes')),
-                ], ['attempt_id' => (int) $attempt['attempt_id']]);
-            } else {
-                CampaignService::settleAttempt($ctx, $attempt, 'skipped', $resolved['reason']);
+        if ((string) $audience['source'] === 'contacts' && $contactsClient === null) {
+            $access = ContactsDelegation::workerClient($ctx->cmpId, $campaignId);
+            if (!$access['ok']) {
+                // No usable grant: pause with the reason. Nothing is dialled
+                // and nothing loops until a person resumes (and so renews).
+                CampaignService::pauseFor($ctx, $campaignId, (string) $access['code'], (string) $access['message']);
+                Db::update('voice_campaign_attempts', ['status' => 'queued'], ['attempt_id' => (int) $attempt['attempt_id']]);
+                $paused = true;
+                continue;
             }
+            $contactsClient = $access['client'];
+        }
+
+        // LIVE. The number comes from the owning product now, not from a copy.
+        $resolved = CampaignService::resolveNumber($ctx, $auth, $audience, $contactsClient);
+
+        if ($resolved['action'] === 'pause') {
+            if ((string) $audience['source'] === 'contacts') {
+                ContactsDelegation::markRefused($campaignId, (string) $resolved['reason']);
+            }
+            CampaignService::pauseFor($ctx, $campaignId, (string) $resolved['reason'], (string) $resolved['message']);
+            Db::update('voice_campaign_attempts', ['status' => 'queued'], ['attempt_id' => (int) $attempt['attempt_id']]);
+            $paused = true;
+            continue;
+        }
+        if ($resolved['action'] === 'defer') {
+            // "The directory is down" is not "this person has no number": it is
+            // retried, backed off and counted — and ends.
+            CampaignService::deferAttempt($ctx, $attempt, (string) $resolved['reason']);
             $skipped++;
             continue;
+        }
+        if ($resolved['action'] === 'skip') {
+            CampaignService::settleAttempt($ctx, $attempt, 'skipped', (string) $resolved['reason']);
+            $skipped++;
+            continue;
+        }
+
+        // Contacts merged this person into another record: the survivor is who
+        // we call, and Voice's own audience row follows it (a live reference).
+        if ((string) $audience['source'] === 'contacts' && $resolved['contact_ref'] !== null
+            && $resolved['contact_ref'] !== (string) $audience['external_ref']) {
+            Db::run(
+                'UPDATE voice_campaign_audience_refs SET external_ref = :ref
+                  WHERE audience_ref_id = :id
+                    AND NOT EXISTS (SELECT 1 FROM voice_campaign_audience_refs o
+                                     WHERE o.campaign_id = voice_campaign_audience_refs.campaign_id
+                                       AND o.source = \'contacts\' AND o.external_ref = :ref)',
+                ['ref' => $resolved['contact_ref'], 'id' => (int) $audience['audience_ref_id']],
+            );
+            $audience['external_ref'] = $resolved['contact_ref'];
         }
 
         $e164 = (string) $resolved['e164'];
@@ -200,7 +247,7 @@ foreach ($campaigns as $campaign) {
           WHERE campaign_id = :id AND status IN (\'queued\', \'dispatching\', \'dialling\', \'connected\')',
         ['id' => $campaignId],
     ) ?? 0);
-    if ($outstanding === 0) {
+    if ($outstanding === 0 && !$paused) {
         Db::update('voice_campaigns', [
             'status'       => 'completed',
             'completed_at' => Clock::sql(Clock::now()),

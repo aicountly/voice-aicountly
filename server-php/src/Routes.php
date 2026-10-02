@@ -72,6 +72,7 @@ final class Routes
         $router->post('/v1/calls/{id}/actions', [CallsController::class, 'actions']);
         $router->get('/v1/calls/{id}/transcript', [CallsController::class, 'transcript']);
         $router->post('/v1/calls/{id}/disposition', [CallsController::class, 'disposition']);
+        $router->post('/v1/calls/{id}/identify', [CallsController::class, 'identify']);
         $router->get('/v1/calls/{id}/summary', [IntelligenceController::class, 'summary']);
         $router->post('/v1/calls/{id}/summary', [IntelligenceController::class, 'editSummary']);
         $router->post('/v1/calls/{id}/review', [IntelligenceController::class, 'review']);
@@ -160,10 +161,14 @@ final class Routes
         $router->post('/v1/suppressions', [WorkspaceController::class, 'suppress']);
         $router->get('/v1/audit', [WorkspaceController::class, 'audit']);
         $router->get('/v1/access', [WorkspaceController::class, 'access']);
+        $router->post('/v1/access/profiles', [WorkspaceController::class, 'saveProfile']);
+        $router->post('/v1/access/assignments', [WorkspaceController::class, 'assignProfile']);
+        $router->delete('/v1/access/assignments', [WorkspaceController::class, 'revokeProfile']);
 
         // -------------------------------------------------------------------
         // Real-time
         // -------------------------------------------------------------------
+        $router->post('/v1/events/ticket', [EventsController::class, 'ticket']);
         $router->get('/v1/events', [EventsController::class, 'stream']);
     }
 }

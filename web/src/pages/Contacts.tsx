@@ -21,14 +21,19 @@ import {
   Badge, Button, Card, EmptyState, Notice, PanelState, Row, formatDateTime, formatDuration,
 } from '../ui'
 
+/** Voice's view of a COMPANY contact (server: ContactsClient::view). */
 interface DirectoryEntry {
-  contact_uuid?: string
-  uuid?: string
-  id?: string
-  name?: string
-  mobile?: string
-  phone?: string
-  email?: string
+  id: string
+  display_name: string
+  organization: string
+  phones: Array<{ value: string; e164: string | null; label: string | null }>
+  emails: Array<{ value: string; label: string | null }>
+  state: 'active' | 'archived' | 'merged' | string
+}
+
+function primaryNumber(entry: DirectoryEntry): string | undefined {
+  const phone = entry.phones.find((p) => p.e164) ?? entry.phones[0]
+  return phone ? (phone.e164 ?? phone.value) : undefined
 }
 
 export default function Contacts() {
@@ -37,7 +42,7 @@ export default function Contacts() {
   const [term, setTerm] = useState(filters.q)
   const [selected, setSelected] = useState<string | null>(null)
 
-  const results = useApi<{ data: DirectoryEntry[] | { data: DirectoryEntry[] } }>(
+  const results = useApi<{ data: DirectoryEntry[] }>(
     (signal) => api.get('v1/contacts', { q: filters.q }, signal),
     [company?.cmp_id, branchId, filters.q],
     { enabled: filters.q.trim().length > 0 },
@@ -47,7 +52,7 @@ export default function Contacts() {
     <>
       <PageHeader
         title="Contacts"
-        subtitle="Read live from Aicountly Contacts. Voice keeps no copy."
+        subtitle="This company's directory, read live from Aicountly Contacts. Voice keeps no copy."
       />
 
       <Card>
@@ -90,18 +95,15 @@ export default function Contacts() {
               empty={<EmptyState title="Nobody matched" body="Try a different spelling or a phone number." />}
             >
               {(data) =>
-                rows(data).map((entry) => {
-                  const ref = entry.contact_uuid ?? entry.uuid ?? entry.id ?? ''
-                  return (
-                    <Row
-                      key={ref}
-                      title={entry.name ?? 'Unnamed contact'}
-                      detail={entry.mobile ?? entry.phone ?? entry.email ?? undefined}
-                      trailing={<Badge tone="neutral">Contacts</Badge>}
-                      onClick={() => setSelected(ref)}
-                    />
-                  )
-                })
+                rows(data).map((entry) => (
+                  <Row
+                    key={entry.id}
+                    title={entry.display_name || 'Unnamed contact'}
+                    detail={primaryNumber(entry) ?? entry.emails[0]?.value ?? (entry.organization || undefined)}
+                    trailing={<Badge tone="neutral">{entry.state === 'archived' ? 'Archived' : 'Company contact'}</Badge>}
+                    onClick={() => setSelected(entry.id)}
+                  />
+                ))
               }
             </PanelState>
           )}
@@ -143,9 +145,9 @@ function ContactDetail({ contactRef, timezone }: { contactRef: string; timezone:
         {(data) => (
           <div className="vstack vstack--tight">
             <div>
-              <h3 style={{ margin: 0 }}>{data.data.contact.name ?? 'Unnamed contact'}</h3>
+              <h3 style={{ margin: 0 }}>{data.data.contact.display_name || 'Unnamed contact'}</h3>
               <p className="vmuted vsmall" style={{ margin: '4px 0 0' }}>
-                {data.data.contact.mobile ?? data.data.contact.phone ?? 'No number on file'}
+                {primaryNumber(data.data.contact) ?? 'No number on file'}
               </p>
             </div>
 
@@ -181,13 +183,8 @@ function ContactDetail({ contactRef, timezone }: { contactRef: string; timezone:
   )
 }
 
-function rows(payload: { data: DirectoryEntry[] | { data: DirectoryEntry[] } }): DirectoryEntry[] {
-  const inner = payload.data
-  if (Array.isArray(inner)) return inner
-  if (inner && Array.isArray((inner as { data: DirectoryEntry[] }).data)) {
-    return (inner as { data: DirectoryEntry[] }).data
-  }
-  return []
+function rows(payload: { data: DirectoryEntry[] }): DirectoryEntry[] {
+  return Array.isArray(payload.data) ? payload.data : []
 }
 
 export { ExternalLink }

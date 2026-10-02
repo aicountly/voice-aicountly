@@ -14,10 +14,11 @@ namespace Aicountly\Api;
  *     AS THAT USER. That is what makes their permissions apply over there
  *     instead of Voice re-implementing another product's access rules.
  *
- *  2. A trusted product backend — `X-Service-Key`, plus `X-Actor-Uuid` naming
- *     the human it is acting for. Lobby books a callback this way: the visitor
- *     at the desk has no session here, and the receptionist who typed it is not
- *     the agent whose queue it lands in.
+ *  2. A product backend — `X-Service-Key` + `X-AIC-Environment`, held to
+ *     ServicePolicy: only its listed routes and permissions, only companies its
+ *     acting person belongs to (their session forwarded as the Bearer, asked of
+ *     Manage) or that are explicitly bound to it. A bare `X-Actor-Uuid` is a
+ *     claim, recorded and never acted on. Lobby books a callback this way.
  *
  *  3. NOT a telephony provider. A carrier callback carries no AICOUNTLY
  *     identity and must never resolve to one — it is authenticated by the
@@ -40,6 +41,13 @@ final class Auth
         public readonly string $sourceApp,
         private readonly string $sesKey,
         private readonly ?array $session,
+        // A service call naming a person by X-Actor-Uuid without their session:
+        // recorded for the audit trail, never acted on (ServicePolicy).
+        public readonly ?string $claimedActor = null,
+        // Set only for the live stream opened with a ticket: the company the
+        // ticket was issued for, and Manage's ownership verdict at that moment.
+        public readonly ?int $streamCompany = null,
+        public readonly bool $streamOwner = false,
     ) {
     }
 
@@ -71,7 +79,8 @@ final class Auth
             throw new \LogicException('Auth::forTesting is CLI only.');
         }
 
-        return new self($uuid, $kind, $sourceApp, $kind === 'user' ? 'test-ses-key' : '', $session);
+        // Per user, so a stand-in for Manage can tell an owner from a member.
+        return new self($uuid, $kind, $sourceApp, $kind === 'user' ? 'test-ses-key-' . $uuid : '', $session);
     }
 
     /** Resolve the caller, or answer 401 and stop. */
@@ -93,21 +102,18 @@ final class Auth
     {
         $serviceKey = Http::header('X-Service-Key');
         if ($serviceKey !== '') {
-            $app = ServiceKeys::resolveApp($serviceKey);
-            if ($app === null) {
-                return null;
-            }
-            // Proven by the key, not claimed in a header. Recording it is what
-            // stops us calling that product back inside its own request.
-            CrossServiceCallContext::adoptAuthenticatedOrigin($app);
-            $actor = Http::header('X-Actor-Uuid');
+            return self::resolveService($serviceKey);
+        }
 
-            return new self(
-                $actor !== '' ? $actor : 'service:' . $app,
-                'service',
-                $app,
-                '',
-                null,
+        // The live stream authenticates with a single-use ticket, never with
+        // a session key in its URL (see StreamTickets).
+        $ticket = self::streamTicket();
+        if ($ticket !== '') {
+            $row = StreamTickets::redeem($ticket);
+
+            return $row === null ? null : new self(
+                (string) $row['user_uuid'], 'user', Env::get('APP_PRODUCT_KEY', 'voice'), '', null, null,
+                (int) $row['cmp_id'], (bool) $row['is_owner'],
             );
         }
 
@@ -128,6 +134,54 @@ final class Auth
             $sesKey,
             $session,
         );
+    }
+
+    /**
+     * Another product's backend (ServicePolicy). The key proves WHICH product;
+     * the environment must be ours; a person is named only by their own
+     * session sent as the Bearer, which then also binds the company (Manage is
+     * asked with it). Without a session the product acts as itself, only on
+     * the routes and companies explicitly allowed to it.
+     */
+    private static function resolveService(string $serviceKey): ?self
+    {
+        $app = ServiceKeys::resolveApp($serviceKey);
+        if ($app === null) {
+            return null;
+        }
+        if (!ServicePolicy::environmentMatches(Http::header('X-AIC-Environment'))) {
+            Http::error(401, 'service_environment_mismatch',
+                'A service call must say which environment it is for (X-AIC-Environment), and it must be this one.');
+        }
+
+        // Proven by the key, not claimed in a header. Recording it is what
+        // stops us calling that product back inside its own request.
+        CrossServiceCallContext::adoptAuthenticatedOrigin($app);
+        $claimed = Http::header('X-Actor-Uuid');
+
+        $sesKey = self::bearer();
+        if ($sesKey === '') {
+            return new self('service:' . $app, 'service', $app, '', null, $claimed !== '' ? $claimed : null);
+        }
+
+        $session = Portal::validateSesKey($sesKey);
+        if ($session === null) {
+            return null;
+        }
+        $uuid = (string) ($session['uuid_aictly'] ?? $session['uuid'] ?? '');
+        if ($claimed !== '' && $claimed !== $uuid) {
+            Http::error(401, 'actor_mismatch', 'X-Actor-Uuid does not match the session sent with it.');
+        }
+
+        // The verified person, acting through the product: their session is
+        // kept so Manage decides whether they belong to the company.
+        return new self($uuid, 'service', $app, $sesKey, $session, null);
+    }
+
+    /** A service call that carries the acting person's own, validated session. */
+    public function hasVerifiedActor(): bool
+    {
+        return $this->isService() && $this->sesKey !== '';
     }
 
     public function isService(): bool
@@ -152,11 +206,9 @@ final class Auth
         return substr(hash('sha256', $this->kind . '|' . $this->uuid . '|' . $this->sesKey), 0, 32);
     }
 
-    /** Portal access type for the company when the portal reported one: 1 = owner. */
-    public function accessType(): ?int
-    {
-        return isset($this->session['acs_type']) ? (int) $this->session['acs_type'] : null;
-    }
+    // There is deliberately no accessType(). The portal's validatesession never
+    // returns `acs_type`; who owns a company is Manage's answer, read per
+    // company in Context::assertAllowed and asked through Context::isOwner().
 
     public function displayName(): string
     {
@@ -194,31 +246,27 @@ final class Auth
     }
 
     /**
-     * The session key from the request.
+     * The stream ticket, on the one route that takes it (/v1/events).
      *
-     * Normally the Authorization header. The one exception is the EventSource
-     * stream: the browser's EventSource cannot set headers at all, so the key
-     * may also arrive as `access_token` on that ONE route.
-     *
-     * That is a real widening and it is bounded deliberately:
-     *   - only /v1/events accepts it, checked against the request path here;
-     *   - the request is same-origin, so the key does not cross a domain;
-     *   - the server never logs the query string (see Clients\ApiClient::log).
-     *
-     * Allowing it everywhere would put session keys in access logs, in
-     * `Referer` headers and in browser history for every request this product
-     * makes, which is exactly why it is not allowed everywhere.
+     * The browser's EventSource cannot set headers. It used to carry the
+     * ses_key in the URL instead — a bearer for every product, in access logs
+     * and history. Now the URL carries a 30-second, single-use ticket bound to
+     * this user, company and route, minted over an authenticated POST.
      */
-    private static function bearer(): string
+    private static function streamTicket(): string
     {
         $path = (string) (parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH) ?: '');
-        if (str_ends_with(rtrim($path, '/'), '/v1/events')) {
-            $fromQuery = $_GET['access_token'] ?? '';
-            if (is_string($fromQuery) && $fromQuery !== '') {
-                return trim($fromQuery);
-            }
+        if (!str_ends_with(rtrim($path, '/'), '/v1/events')) {
+            return '';
         }
+        $ticket = $_GET['ticket'] ?? '';
 
+        return is_string($ticket) ? trim($ticket) : '';
+    }
+
+    /** The session key from the Authorization header — never from a URL. */
+    private static function bearer(): string
+    {
         $header = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
         if (!is_string($header) || $header === '') {
             if (function_exists('apache_request_headers')) {

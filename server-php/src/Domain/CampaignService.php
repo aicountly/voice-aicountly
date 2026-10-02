@@ -47,6 +47,9 @@ final class CampaignService
     /** Never dispatch more than this in one worker pass, whatever the rate allows. */
     private const MAX_BATCH = 25;
 
+    /** How many times one attempt waits for an unreachable directory before it is skipped. */
+    public const MAX_DEFERRALS = 5;
+
     public const ACTIVE_STATES = ['scheduled', 'running'];
 
     /**
@@ -161,6 +164,18 @@ final class CampaignService
             ? self::check('number', 'pass', 'A business number is available to call from.')
             : self::check('number', 'error', 'No active business number to call from.');
 
+        // --- Contacts access for the worker -------------------------------------
+        // The worker reads a Contacts audience through a delegation grant a
+        // person issues when they start the campaign (ContactsDelegation). A
+        // server that cannot hold one cannot run this campaign; say so now.
+        if (ContactsDelegation::needed($campaignId)) {
+            $gap = ContactsDelegation::configurationGap();
+            $checks[] = $gap === null
+                ? self::check('directory_access', 'pass', 'Contacts access is granted by the person who starts the campaign.',
+                    ContactsDelegation::describe($ctx->cmpId, $campaignId))
+                : self::check('directory_access', 'error', $gap);
+        }
+
         // --- script / agent ---------------------------------------------------
         $checks[] = self::scriptCheck($ctx, $campaign);
         if ((string) $campaign['mode'] === 'appointment_reminder') {
@@ -216,6 +231,7 @@ final class CampaignService
             'pause'  => self::pause($ctx, $auth, $campaignId, $status),
             'resume' => self::resume($ctx, $auth, $campaignId, $status),
             'cancel' => self::cancel($ctx, $auth, $campaignId, $status),
+            'renew_access' => self::renewAccess($ctx, $auth, $campaignId, $status),
             default  => ['ok' => false, 'code' => 'unknown_action', 'message' => 'Not a campaign action.', 'status' => $status],
         };
     }
@@ -262,29 +278,68 @@ final class CampaignService
      * number comes back, is used for this attempt, and is recorded on the
      * attempt row as evidence of what was dialled.
      *
+     * `action` says what the worker must do — the answer is never "requeue at
+     * +10 minutes forever" any more (G18#1):
+     *   dial   ok, e164 set (contact_ref is the survivor when Contacts merged it)
+     *   skip   contact_gone (deleted / not in this company) or no_number — terminal
+     *   defer  the directory could not answer — bounded, backed-off retry
+     *   pause  access is missing, expired or refused — a person must act
+     *
      * @param array<string, mixed> $audienceRef
-     * @return array{ok: bool, e164: ?string, reason: ?string}
+     * @return array{ok: bool, e164: ?string, reason: ?string, action: string, message: ?string, contact_ref: ?string}
      */
-    public static function resolveNumber(Context $ctx, Auth $auth, array $audienceRef): array
+    public static function resolveNumber(Context $ctx, Auth $auth, array $audienceRef, ?ContactsClient $contacts = null): array
     {
         $source = (string) $audienceRef['source'];
         $externalRef = (string) ($audienceRef['external_ref'] ?? '');
+        $out = static fn (bool $ok, ?string $e164, ?string $reason, string $action, ?string $message = null, ?string $ref = null): array =>
+            ['ok' => $ok, 'e164' => $e164, 'reason' => $reason, 'action' => $action, 'message' => $message, 'contact_ref' => $ref];
 
         if ($externalRef === '') {
-            return ['ok' => false, 'e164' => null, 'reason' => 'no_reference'];
+            return $out(false, null, 'no_reference', 'skip');
         }
 
-        $result = match ($source) {
-            'contacts' => (new ContactsClient())->withSession($auth->sesKey())->contact($externalRef),
-            'crm'      => (new CrmClient())->withSession($auth->sesKey())->lead($externalRef),
-            default    => ['ok' => false, 'status' => 0, 'body' => null, 'error' => 'unsupported_source'],
-        };
+        if ($source === 'contacts') {
+            // A COMPANY contact, read from Contacts' company endpoint, merges
+            // followed; phones read from phones[{value}] (G18#2, G18#3). The
+            // worker passes its delegation client; a person's session otherwise.
+            $client = $contacts ?? (new ContactsClient())->withSession($auth->sesKey());
+            $result = $client->contact($ctx->cmpId, $externalRef, CallingPolicy::regionFor($ctx));
 
+            if (!$result['ok']) {
+                return match ($result['kind']) {
+                    'gone', 'not_found' => $out(false, null, 'contact_gone', 'skip', (string) $result['message']),
+                    'delegation_invalid', 'unauthorized' => $out(false, null, 'directory_access_invalid', 'pause',
+                        'Aicountly Contacts refused this campaign\'s access (expired, revoked, or the person who granted it lost access). Resume the campaign to renew it.'),
+                    'forbidden' => $out(false, null, 'directory_access_forbidden', 'pause',
+                        'Aicountly Contacts does not allow this campaign to read that contact. Check the audience and who started the campaign.'),
+                    'not_configured' => $out(false, null, 'directory_access_unconfigured', 'pause', (string) $result['message']),
+                    default => $out(false, null, 'owner_unavailable', 'defer', (string) $result['message']),
+                };
+            }
+
+            $e164 = ContactsClient::dialable($result['data']);
+            $ref = (string) $result['data']['id'];
+
+            return $e164 === null
+                ? $out(false, null, 'no_number', 'skip', null, $ref)
+                : $out(true, $e164, null, 'dial', null, $ref);
+        }
+
+        if ($source !== 'crm') {
+            return $out(false, null, 'unsupported_source', 'skip');
+        }
+
+        $result = (new CrmClient())->withSession($auth->sesKey())->lead($externalRef);
         if (!$result['ok']) {
-            // Unreachable is not "no number" and not "ineligible". The attempt
-            // is deferred, not skipped, because the person may be perfectly
-            // callable once the directory answers again.
-            return ['ok' => false, 'e164' => null, 'reason' => 'owner_unavailable'];
+            $status = (int) ($result['status'] ?? 0);
+
+            return match (true) {
+                $status === 404 => $out(false, null, 'contact_gone', 'skip'),
+                $status === 401 || $status === 403 => $out(false, null, 'crm_access_refused', 'pause',
+                    'Aicountly CRM refused the campaign worker. A CRM audience cannot be dialled without a CRM credential for the worker.'),
+                default => $out(false, null, 'owner_unavailable', 'defer'),
+            };
         }
 
         $body = $result['body'] ?? [];
@@ -297,11 +352,37 @@ final class CampaignService
             }
         }
 
-        $e164 = $raw === '' ? null : CallingPolicy::normalise($raw);
+        $e164 = $raw === '' ? null : CallingPolicy::normaliseFor($ctx, $raw);
 
         return $e164 === null
-            ? ['ok' => false, 'e164' => null, 'reason' => 'no_number']
-            : ['ok' => true, 'e164' => $e164, 'reason' => null];
+            ? $out(false, null, 'no_number', 'skip')
+            : $out(true, $e164, null, 'dial');
+    }
+
+    /**
+     * Put an attempt back after the directory could not answer: backed off
+     * (10, 20, 40, 80, 160 minutes) and counted; after MAX_DEFERRALS it is
+     * skipped as directory_unavailable instead of waiting forever.
+     *
+     * @param array<string, mixed> $attempt
+     * @return string the attempt's new status
+     */
+    public static function deferAttempt(Context $ctx, array $attempt, string $reason): string
+    {
+        $deferred = (int) ($attempt['defer_count'] ?? 0) + 1;
+        if ($deferred > self::MAX_DEFERRALS) {
+            self::settleAttempt($ctx, $attempt, 'skipped', 'directory_unavailable');
+
+            return 'skipped';
+        }
+        Db::update('voice_campaign_attempts', [
+            'status'        => 'queued',
+            'skip_reason'   => $reason,
+            'defer_count'   => $deferred,
+            'scheduled_for' => Clock::sql(Clock::now()->modify('+' . (10 * (2 ** ($deferred - 1))) . ' minutes')),
+        ], ['attempt_id' => (int) $attempt['attempt_id']]);
+
+        return 'queued';
     }
 
     /** Mark an attempt's outcome, and schedule a retry if the policy allows one. */
@@ -434,12 +515,30 @@ final class CampaignService
 
         $validation = self::validate($ctx, $campaignId);
         if (!$validation['ready']) {
+            $first = null;
+            foreach ($validation['checks'] as $check) {
+                if ($check['status'] === 'error') {
+                    $first = (string) $check['message'];
+                    break;
+                }
+            }
+
             return [
                 'ok'      => false,
                 'code'    => 'not_ready',
-                'message' => 'This campaign is not ready to launch.',
+                'message' => 'This campaign is not ready to launch' . ($first !== null ? ': ' . $first : '.'),
                 'status'  => $status,
             ];
+        }
+
+        // A Contacts audience is read by the worker through a grant issued NOW,
+        // by the person pressing Start. No grant, no start: a running campaign
+        // that cannot read its audience would only ever loop.
+        if (ContactsDelegation::needed($campaignId)) {
+            $grant = ContactsDelegation::issueForCampaign($ctx, $auth, $campaignId);
+            if (!$grant['ok']) {
+                return ['ok' => false, 'code' => 'not_ready', 'message' => (string) $grant['message'], 'status' => $status];
+            }
         }
 
         // Queue the first attempt per audience member. ON CONFLICT DO NOTHING
@@ -509,8 +608,18 @@ final class CampaignService
             return ['ok' => false, 'code' => 'not_ready', 'message' => 'The launch checks no longer pass.', 'status' => $status];
         }
 
+        // Resuming is the person's moment to renew the worker's Contacts access
+        // (it is often why the campaign paused).
+        if (ContactsDelegation::needed($campaignId)) {
+            $grant = ContactsDelegation::issueForCampaign($ctx, $auth, $campaignId);
+            if (!$grant['ok']) {
+                return ['ok' => false, 'code' => 'not_ready', 'message' => (string) $grant['message'], 'status' => $status];
+            }
+        }
+
         Db::update('voice_campaigns', [
             'status'    => 'running',
+            'status_reason' => null,
             'paused_at' => null,
             'updated_at' => Clock::sql(Clock::now()),
         ], ['campaign_id' => $campaignId, 'cmp_id' => $ctx->cmpId]);
@@ -542,6 +651,36 @@ final class CampaignService
         Audit::record($ctx, $auth, Audit::CAMPAIGN_CANCELLED, 'campaign', (string) $campaignId);
 
         return ['ok' => true, 'code' => null, 'message' => 'Cancelled. Queued calls will not be placed.', 'status' => 'cancelled'];
+    }
+
+    private static function renewAccess(Context $ctx, Auth $auth, int $campaignId, string $status): array
+    {
+        if (in_array($status, ['completed', 'cancelled'], true)) {
+            return ['ok' => false, 'code' => 'illegal_transition', 'message' => 'That campaign has finished.', 'status' => $status];
+        }
+        if (!ContactsDelegation::needed($campaignId)) {
+            return ['ok' => true, 'code' => null, 'message' => 'This campaign does not read Contacts.', 'status' => $status];
+        }
+        $grant = ContactsDelegation::issueForCampaign($ctx, $auth, $campaignId);
+
+        return $grant['ok']
+            ? ['ok' => true, 'code' => null, 'message' => 'Contacts access renewed until ' . $grant['expires_at'] . '.', 'status' => $status]
+            : ['ok' => false, 'code' => 'not_ready', 'message' => (string) $grant['message'], 'status' => $status];
+    }
+
+    /**
+     * Pause a running campaign for a reason a person must act on — Contacts
+     * access expired or refused, CRM refusing the worker. Paused, not looped:
+     * nothing is dialled until somebody resumes it, which renews the access.
+     */
+    public static function pauseFor(Context $ctx, int $campaignId, string $reason, string $message): void
+    {
+        Db::run(
+            "UPDATE voice_campaigns SET status = 'paused', paused_at = NOW(), status_reason = :reason, updated_at = NOW()
+              WHERE campaign_id = :id AND cmp_id = :cmp AND status = 'running'",
+            ['reason' => $reason . ': ' . $message, 'id' => $campaignId, 'cmp' => $ctx->cmpId],
+        );
+        Audit::record($ctx, null, Audit::CAMPAIGN_PAUSED, 'campaign', (string) $campaignId, ['reason' => $reason, 'by' => 'worker']);
     }
 
     /** @param array<string, bool> $capabilities @return array{ok: bool, message: ?string} */

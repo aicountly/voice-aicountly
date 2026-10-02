@@ -60,9 +60,11 @@ const AGENT_B = '7002';
 truncateAll();
 stubReset();
 
-$owner = Auth::forTesting(USER, 'user', 'voice', ['acs_type' => 1]);
+$owner = markOwner(Auth::forTesting(USER));
 $member = Auth::forTesting(OTHER_USER, 'user', 'voice', []);
-$person = Auth::forTesting(PERSON, 'user', 'voice', ['acs_type' => 1]);
+// The callback owner of the diary groups. Ownership is Manage's answer
+// (Context::isOwner), not acs_type, so the person is marked as one here.
+$person = markOwner(Auth::forTesting(PERSON, 'user', 'voice', ['acs_type' => 1]));
 
 echo "Voice integration tests\n" . str_repeat('=', 62) . "\n";
 
@@ -114,8 +116,8 @@ T::group('1. Tenant isolation');
     $forbidden = request('GET', '/v1/calls', ['cmp_id' => '999']);
     T::same(403, $forbidden['status'], 'a company Manage refuses is 403, not an empty list');
     Context::resetForTesting();
-    Context::trustForTesting(CMP, $owner);
-    Context::trustForTesting(OTHER_CMP, $owner);
+    Context::trustForTesting(CMP, $owner, true);
+    Context::trustForTesting(OTHER_CMP, $owner, true);
 }
 
 // ===========================================================================
@@ -419,7 +421,7 @@ T::group('8. Provider capability restrictions');
 
     // A company with no connection can do nothing, and says so clearly.
     $emptyCtx = Context::forCompany(4999);
-    Context::trustForTesting(4999, $owner);
+    Context::trustForTesting(4999, $owner, true);
     // Open all hours, so what is refused is the missing connection and not the
     // time of day the suite happens to run at.
     seedSettings(4999);
@@ -1038,7 +1040,7 @@ T::group('21. Company switch clears prior tenant data');
     Permissions::forget();
 
     $ctxA = Context::forCompany(CMP);
-    Context::trustForTesting(CMP, $owner);
+    Context::trustForTesting(CMP, $owner, true);
     $permissionsA = Permissions::granted($ctxA, $owner);
 
     $ctxB = Context::forCompany(OTHER_CMP);
@@ -1061,8 +1063,8 @@ T::group('21. Company switch clears prior tenant data');
     }
     T::ok($refused, 'switching to a company the session may not open is refused, not silently empty');
 
-    Context::trustForTesting(CMP, $owner);
-    Context::trustForTesting(OTHER_CMP, $owner);
+    Context::trustForTesting(CMP, $owner, true);
+    Context::trustForTesting(OTHER_CMP, $owner, true);
 }
 
 // ===========================================================================
@@ -1245,7 +1247,7 @@ T::group('25. AI runs through AI Pulse');
     $call = $sent[0] ?? ['method' => '', 'url' => '', 'headers' => [], 'body' => []];
     T::same('POST https://pulse.test/api/ai/v1/generate', $call['method'] . ' ' . $call['url'], 'to POST /api/ai/v1/generate');
     T::same('voice', $call['headers']['x-pulse-product'] ?? null, 'as product "voice"');
-    T::same('Bearer test-ses-key', $call['headers']['authorization'] ?? null, 'with the signed-in user’s own session');
+    T::same('Bearer test-ses-key-' . USER, $call['headers']['authorization'] ?? null, 'with the signed-in user’s own session');
     T::ok(!isset($call['headers']['x-pulse-service-key']), 'and no service key when a user is behind the call');
     T::same(
         ['call.summary', 'economy', 300],
@@ -1360,7 +1362,7 @@ T::group('25. AI runs through AI Pulse');
         'the Studio reports AI through AI Pulse, from Pulse’s own status');
     T::same('GET https://pulse.test/api/ai/v1/status', ($sent[0]['method'] ?? '') . ' ' . ($sent[0]['url'] ?? ''),
         'asked at GET /api/ai/v1/status');
-    T::same('Bearer test-ses-key', $sent[0]['headers']['authorization'] ?? null, 'with the viewer’s own session');
+    T::same('Bearer test-ses-key-' . USER, $sent[0]['headers']['authorization'] ?? null, 'with the viewer’s own session');
     T::ok(!array_key_exists('model', $ai) && !array_key_exists('provider', $ai), 'and it names no model or provider for Voice to choose');
 
     $replies = [$pulseStatus(false)];
@@ -1386,18 +1388,31 @@ T::group('25. AI runs through AI Pulse');
         'the unauthenticated health check does not ask Pulse without a service key, and says so');
 
     // --- Where Pulse lives ---------------------------------------------------------
-    $origin = static function (?string $configured, string $host): string {
+    // The origin follows the CONFIGURED environment; the request's Host is a
+    // claim and must change nothing (G18#25).
+    $origin = static function (?string $configured, string $environment, string $host): string {
         putenv($configured === null ? 'PULSE_API_ORIGIN' : 'PULSE_API_ORIGIN=' . $configured);
+        putenv('AIC_ENVIRONMENT=' . $environment);
         $_SERVER['HTTP_HOST'] = $host;
 
         return (new PulseAiClient())->origin();
     };
-    T::same('https://pulse.aicountly.com', $origin(null, 'voice.aicountly.com'), 'production Voice uses production Pulse');
-    T::same('https://pulse.gh.aicountly.com', $origin(null, 'voice.gh.aicountly.com'), 'sandbox Voice uses pulse.gh.aicountly.com');
-    T::same('https://pulse.gh.aicountly.com', $origin(null, 'localhost:8000'), 'as does localhost');
-    T::same('https://pulse.example.test', $origin('https://pulse.example.test/api/', 'voice.aicountly.com'),
+    T::same('https://pulse.aicountly.com', $origin(null, 'production', 'voice.aicountly.com'), 'production Voice uses production Pulse');
+    T::same('https://pulse.gh.aicountly.com', $origin(null, 'sandbox', 'voice.gh.aicountly.com'), 'sandbox Voice uses pulse.gh.aicountly.com');
+    T::same('https://pulse.gh.aicountly.com', $origin(null, 'local', 'localhost:8000'), 'as does a local deployment');
+    T::same('https://pulse.aicountly.com', $origin(null, 'production', 'x.gh.aicountly.com'),
+        'a production deployment asked with a sandbox Host header still uses production Pulse');
+    T::same('https://pulse.aicountly.com', $origin(null, 'production', 'localhost'),
+        'and a Host of localhost changes nothing either');
+    T::same('', $origin(null, 'not-an-environment', 'voice.aicountly.com'),
+        'an unrecognised environment picks no Pulse at all rather than guessing');
+    $unconfigured = (new PulseAiClient())->status('a-session');
+    T::ok(!$unconfigured['ok'] && $unconfigured['code'] === 'not_configured',
+        'and a call is refused as not configured, without reaching anybody');
+    T::same('https://pulse.example.test', $origin('https://pulse.example.test/api/', 'production', 'voice.aicountly.com'),
         'PULSE_API_ORIGIN wins, with a trailing /api ignored');
     putenv('PULSE_API_ORIGIN');
+    putenv('AIC_ENVIRONMENT');
     unset($_SERVER['HTTP_HOST']);
 
     // --- Nothing is left that could reach a model provider ---------------------
@@ -1432,6 +1447,566 @@ T::group('25. AI runs through AI Pulse');
 
     AiClient::useClientForTesting(null);
     Features::overrideForTesting(null);
+}
+
+// ===========================================================================
+T::group('35. Sibling hosts come from configuration, never from the request (G18#25)');
+// ===========================================================================
+{
+    // LOBBY_API_BASE is not set by the test .env, so this client shows what
+    // the environment alone decides.
+    $base = static function (string $environment, string $host): string {
+        putenv('AIC_ENVIRONMENT=' . $environment);
+        $_SERVER['HTTP_HOST'] = $host;
+
+        return (new \Aicountly\Api\Clients\LobbyClient())->base();
+    };
+
+    T::same('https://lobby.aicountly.com', $base('production', 'voice.aicountly.com'), 'production talks to production');
+    T::same('https://lobby.aicountly.com', $base('production', 'evil.gh.aicountly.com'),
+        'a forged sandbox Host on production still talks to production');
+    T::same('https://lobby.aicountly.com', $base('production', ''), 'and so does a CLI worker with no Host at all');
+    T::same('https://lobby.gh.aicountly.com', $base('sandbox', 'voice.aicountly.com'),
+        'sandbox talks to sandbox whatever the Host says');
+    T::same('', $base('bogus', 'voice.aicountly.com'), 'an unrecognised environment resolves to no host');
+
+    $refused = (new \Aicountly\Api\Clients\LobbyClient())->request('GET', 'health');
+    T::ok(!$refused['ok'] && $refused['error'] === 'environment_not_configured',
+        'and a request is refused without being sent anywhere');
+
+    // An explicit *_API_BASE still wins — that is how the suite reaches its stub.
+    putenv('AIC_ENVIRONMENT=production');
+    T::same(rtrim(Env::get('MANAGE_API_BASE'), '/'), (new \Aicountly\Api\Clients\ManageClient())->base(),
+        'an explicit MANAGE_API_BASE wins over the environment');
+
+    // The Host may make a server refuse, never choose.
+    putenv('AIC_ENVIRONMENT=production');
+    T::ok(\Aicountly\Api\Environment::hostContradicts('voice.gh.aicountly.com'),
+        'a production server refuses a sandbox Host');
+    T::ok(!\Aicountly\Api\Environment::hostContradicts('voice.aicountly.com'), 'but not its own name');
+    T::ok(!\Aicountly\Api\Environment::hostContradicts(''), 'nor a CLI worker with no Host');
+    putenv('AIC_ENVIRONMENT=sandbox');
+    T::ok(\Aicountly\Api\Environment::hostContradicts('voice.aicountly.com'),
+        'a sandbox server refuses a production Host (a .env copied from the production template)');
+    T::ok(!\Aicountly\Api\Environment::hostContradicts('gh-voice.aicountly.com'), 'but not a sandbox name');
+
+    putenv('AIC_ENVIRONMENT');
+    unset($_SERVER['HTTP_HOST']);
+    T::same('local', \Aicountly\Api\Environment::current(), 'with AIC_ENVIRONMENT unset, APP_ENV decides');
+}
+
+// ===========================================================================
+T::group('36. Numbers become E.164 with a region, never by prefixing + (G18#6)');
+// ===========================================================================
+{
+    $e = static fn (string $raw, ?string $region = 'IN'): ?string => \Aicountly\Api\Support\PhoneNumber::toE164($raw, $region);
+
+    T::same('+919876543210', $e('9876543210'), 'an Indian national mobile is +91, not +98 (Iran)');
+    T::same('+919876543210', $e('09876543210'), 'the trunk 0 is dropped');
+    T::same('+919876543210', $e('+91 98765-43210'), 'an international form is kept');
+    T::same('+919876543210', $e('0091 98765 43210'), '00 is the international prefix');
+    T::same('+919876543210', $e('91 98765 43210'), 'the country code typed without + is recognised');
+    T::same('+918023456789', $e('080 2345 6789'), 'a landline with its STD code');
+    T::same(null, $e('9876543210', null), 'with no region a national number is refused, not guessed');
+    T::same(null, $e('98765'), 'too short is refused');
+    T::same(null, $e('98765 43210 ext 12'), 'an extension is refused rather than silently dropped');
+    T::same(null, $e('+91 12345'), 'a known country with the wrong national length is refused');
+    T::same('+14155550100', $e('(415) 555-0100', 'US'), 'a US national number in the US region');
+    T::same('+447911123456', $e('07911 123456', 'GB'), 'a UK mobile with its trunk 0');
+    T::ok(\Aicountly\Api\Support\PhoneNumber::same('98765 43210', '+919876543210', 'IN'), 'two forms of one number compare equal');
+
+    $ctx = scope(CMP, $owner);
+    seedSettings(CMP);
+    T::same('IN', CallingPolicy::regionFor($ctx), 'with nothing configured the region is IN');
+    putenv('VOICE_DEFAULT_PHONE_REGION=AE');
+    T::same('AE', CallingPolicy::regionFor($ctx), 'VOICE_DEFAULT_PHONE_REGION is next');
+    seedSettings(CMP, ['default_phone_region' => 'US']);
+    T::same('US', CallingPolicy::regionFor($ctx), 'and the company setting wins over it');
+    T::same('+14155550100', CallingPolicy::normaliseFor($ctx, '415 555 0100'), 'so a national number is read in the company region');
+    putenv('VOICE_DEFAULT_PHONE_REGION');
+    seedSettings(CMP, ['default_phone_region' => '']);
+    T::same(null, \Aicountly\Api\Settings::forCompany(CMP)['default_phone_region'], 'an empty value clears the setting');
+
+    // Suppression typed nationally protects the number a campaign dials.
+    Auth::adopt($owner);
+    Context::trustForTesting(CMP, $owner, true);
+    $suppressed = request('POST', '/v1/suppressions', ['cmp_id' => (string) CMP], ['e164' => '98765 00077', 'reason' => 'opt_out']);
+    T::same(200, $suppressed['status'], 'a suppression can be entered without a country code');
+    T::ok(CallingPolicy::isSuppressed($ctx, '+919876500077'), 'and it suppresses the E.164 number');
+    $check = CallingPolicy::check($ctx, '+919876500077');
+    T::same('suppressed', $check['reason'], 'so a dial to +91… is refused as suppressed');
+
+    // A callback typed nationally is stored as the real number.
+    $callback = request('POST', '/v1/callbacks', ['cmp_id' => (string) CMP], ['e164' => '9876543210', 'reason' => 'test']);
+    $stored = Db::scalar('SELECT e164 FROM voice_callbacks WHERE cmp_id = :cmp ORDER BY callback_id DESC LIMIT 1', ['cmp' => CMP]);
+    T::ok(in_array($callback['status'], [200, 201], true), 'a callback with a national number is accepted');
+    T::same('+919876543210', $stored, 'and stored as +919876543210, never +9876543210');
+
+    $badCallback = request('POST', '/v1/callbacks', ['cmp_id' => (string) CMP], ['e164' => '12345']);
+    T::same(422, $badCallback['status'], 'a number that cannot be read is refused with 422');
+
+    // A call placed to a national number dials the national number.
+    $call = CallService::place($ctx, $owner, ['to' => '98765 00088']);
+    T::ok($call['ok'], 'a call to a national number is placed');
+    T::same('+919876500088', $call['call']['remote_e164'] ?? null, 'to +91, the company region');
+}
+
+// ===========================================================================
+T::group('37. Company owner comes from Manage companyinfo, not acs_type (I-18, G18#5)');
+// ===========================================================================
+{
+    $a = static fn (int $status, ?array $json, int $cmp) => \Aicountly\Api\ManageCompanyAnswer::interpret($status, $json, $cmp);
+    T::same('allowed', $a(200, ['success' => '1', 'data' => ['comp_id' => 5, 'ownership' => 'owner']], 5)['outcome'], 'a 2xx about this company is membership');
+    T::ok($a(200, ['success' => '1', 'data' => ['comp_id' => 5, 'ownership' => 'owner']], 5)['isOwner'], 'ownership "owner" is owner');
+    T::ok($a(200, ['data' => ['cmp_id' => 5, 'is_creator' => true]], 5)['isOwner'], 'is_creator true is owner');
+    T::ok($a(200, ['data' => ['cmp_id' => 5, 'access_type' => 1]], 5)['isOwner'], 'access_type 1 is owner');
+    T::ok(!$a(200, ['data' => ['cmp_id' => 5, 'ownership' => 'shared', 'access_type' => 2]], 5)['isOwner'], 'a shared member is not');
+    T::same('denied', $a(404, ['success' => false], 5)['outcome'], '404 is denied');
+    T::same('denied', $a(401, null, 5)['outcome'], '401 is denied');
+    T::same('unavailable', $a(0, null, 5)['outcome'], 'no answer is unavailable');
+    T::same('unavailable', $a(502, null, 5)['outcome'], '5xx is unavailable');
+    T::same('unavailable', $a(200, ['data' => ['comp_id' => 6]], 5)['outcome'], 'an answer about another company is never a yes');
+
+    // The real Context path, against the stub's Manage-shaped companyinfo.
+    $owner28 = Auth::forTesting(USER);            // the stub's owner token
+    $member28 = Auth::forTesting('user-ccc');      // a shared member, no assignment
+    $fresh = 4003;
+    Context::resetForTesting();
+    $conn28 = seedConnection($fresh);
+    seedNumber($fresh, $conn28, '+918066000003');
+    seedSettings($fresh);
+
+    Auth::adopt($owner28);
+    $access = request('GET', '/v1/access', ['cmp_id' => (string) $fresh]);
+    T::same(200, $access['status'], 'the owner opens Access in a fresh company');
+    T::same(true, $access['body']['data']['is_owner'] ?? null, 'and is the owner because Manage says so');
+    T::ok(in_array('voice.access.manage', $access['body']['data']['granted'] ?? [], true), 'holding voice.access.manage with no seeded rows');
+
+    $profile = request('POST', '/v1/access/profiles', ['cmp_id' => (string) $fresh], [
+        'name' => 'Agents', 'permissions' => ['voice.dashboard.view', 'voice.call.view', 'voice.call.place'],
+    ]);
+    T::same(201, $profile['status'], 'the owner creates the first profile');
+    $profileId = (int) ($profile['body']['data']['profile_id'] ?? 0);
+    $assign = request('POST', '/v1/access/assignments', ['cmp_id' => (string) $fresh], ['user_uuid' => 'user-ccc', 'profile_id' => $profileId]);
+    T::same(201, $assign['status'], 'and assigns it to a member');
+    $placed = request('POST', '/v1/calls', ['cmp_id' => (string) $fresh], ['to' => '+919876500091']);
+    T::ok(in_array($placed['status'], [200, 201, 202], true), 'the owner can place a call with no profile of their own');
+
+    Context::resetForTesting();
+    Auth::adopt($member28);
+    $memberAccess = request('GET', '/v1/access', ['cmp_id' => (string) $fresh]);
+    T::same(false, $memberAccess['body']['data']['is_owner'] ?? null, 'a member is not the owner');
+    T::ok(in_array('voice.call.place', $memberAccess['body']['data']['granted'] ?? [], true), 'and holds what the owner assigned');
+    $escalate = request('POST', '/v1/access/profiles', ['cmp_id' => (string) $fresh], ['name' => 'Mine', 'permissions' => ['voice.access.manage']]);
+    T::same(403, $escalate['status'], 'but cannot manage access');
+
+    $revoke = (static function () use ($owner28, $fresh, $profileId) {
+        Context::resetForTesting();
+        Auth::adopt($owner28);
+        $_GET = [];
+
+        return request('DELETE', '/v1/access/assignments', ['cmp_id' => (string) $fresh, 'user_uuid' => 'user-ccc', 'profile_id' => (string) $profileId]);
+    })();
+    T::same(200, $revoke['status'], 'the owner revokes it');
+    Context::resetForTesting();
+    Auth::adopt($member28);
+    $after = request('POST', '/v1/calls', ['cmp_id' => (string) $fresh], ['to' => '+919876500092']);
+    T::same(403, $after['status'], 'and the member can no longer place calls (day-one grants only)');
+
+    $denied = request('GET', '/v1/access', ['cmp_id' => '999']);
+    T::same(403, $denied['status'], 'Manage 404 for the company is a 403');
+    Context::resetForTesting();
+    $down = request('GET', '/v1/access', ['cmp_id' => '998']);
+    T::same(503, $down['status'], 'Manage failing is a 503, not a 403 and not an allow');
+    Context::resetForTesting();
+    $other = request('GET', '/v1/access', ['cmp_id' => '997']);
+    T::same(503, $other['status'], 'an answer about another company is a 503');
+
+    Context::resetForTesting();
+    Context::trustForTesting(CMP, $owner, true);
+    Auth::adopt($owner);
+}
+
+// ===========================================================================
+T::group('38. Contacts: canonical shape, company endpoints, matchCount (G18#2, G18#3, G18#7)');
+// ===========================================================================
+{
+    stubReset();
+    Context::resetForTesting();
+    Context::trustForTesting(CMP, $owner, true);
+    Auth::adopt($owner);
+
+    $search = request('GET', '/v1/contacts', ['cmp_id' => (string) CMP, 'q' => 'stub']);
+    T::same(200, $search['status'], 'a directory search answers');
+    T::same('Stub One', $search['body']['data'][0]['display_name'] ?? null, 'the name comes from displayName, not a guessed name field');
+    T::same('+919876500011', $search['body']['data'][0]['phones'][0]['e164'] ?? null, 'the number comes from phones[{value}]');
+    T::same('company', $search['body']['meta']['scope'] ?? null, 'and the company directory was asked, not a personal book');
+
+    $one = request('GET', '/v1/contacts', ['cmp_id' => (string) CMP, 'phone' => '98765 00011']);
+    T::same(1, $one['body']['meta']['matchCount'] ?? null, 'a national number finds the +91 contact (matchCount 1)');
+    T::same(true, $one['body']['meta']['attributable'] ?? null, 'and exactly one match holding that number is attributable');
+    $two = request('GET', '/v1/contacts', ['cmp_id' => (string) CMP, 'phone' => '+919876500099']);
+    T::same(2, $two['body']['meta']['matchCount'] ?? null, 'a shared number reports two matches');
+    T::same(false, $two['body']['meta']['attributable'] ?? null, 'and is NOT attributable');
+    $none = request('GET', '/v1/contacts', ['cmp_id' => (string) CMP, 'phone' => '+919876500055']);
+    T::same(0, $none['body']['meta']['matchCount'] ?? null, 'an unknown number matches nobody');
+    T::same([], $none['body']['data'] ?? null, 'and returns no contact at all');
+
+    $merged = request('GET', '/v1/contacts/merged-old', ['cmp_id' => (string) CMP]);
+    T::same('stub-1', $merged['body']['data']['contact']['id'] ?? null, 'a merged id is followed to its survivor');
+    T::same('merged-old', $merged['body']['meta']['resolved_from'] ?? null, 'and says it was');
+    $gone = request('GET', '/v1/contacts/gone', ['cmp_id' => (string) CMP]);
+    T::same(404, $gone['status'], 'a deleted contact is 404, not an outage');
+
+    $created = request('POST', '/v1/contacts', ['cmp_id' => (string) CMP], ['name' => 'Priya Sharma', 'phone' => '98765 43210', 'ecosystemRoles' => ['lead']]);
+    T::same(201, $created['status'], 'a contact is created in Contacts');
+    T::same('Priya Sharma', $created['body']['data']['display_name'] ?? null, 'sent as displayName');
+    T::same('+919876543210', $created['body']['data']['phones'][0]['e164'] ?? null, 'with the number in E.164');
+    $empty = request('POST', '/v1/contacts', ['cmp_id' => (string) CMP], []);
+    T::same(422, $empty['status'], 'an empty create is refused here, not passed through');
+
+    $ctx29 = scope(CMP, $owner);
+    T::same('+919876500012', CampaignService::resolveNumber($ctx29, $owner, ['source' => 'contacts', 'external_ref' => 'national'])['e164'],
+        'a campaign reads a nationally stored phone as the company-region E.164');
+    T::same('no_number', CampaignService::resolveNumber($ctx29, $owner, ['source' => 'contacts', 'external_ref' => 'missing'])['reason'],
+        'a contact with no phone is no_number');
+
+    $campaign29 = (int) Db::insert('voice_campaigns', [
+        'cmp_id' => CMP, 'name' => 'Audience check', 'mode' => 'agent', 'status' => 'draft',
+        'script' => ['body' => 'Hello', 'reviewed' => true, 'audience_purpose' => 'Requested callback'],
+    ], 'campaign_id');
+    $refused = request('POST', '/v1/campaigns/' . $campaign29 . '/audience', ['cmp_id' => (string) CMP], ['source' => 'contacts', 'refs' => ['stub-5', 'private-7']]);
+    T::same(422, $refused['status'], 'a personal (non-company) contact id is refused as a campaign audience');
+    T::same(['private-7'], $refused['body']['error']['details']['refused'] ?? null, 'naming the refused id');
+    $accepted = request('POST', '/v1/campaigns/' . $campaign29 . '/audience', ['cmp_id' => (string) CMP], ['source' => 'contacts', 'refs' => ['stub-5']]);
+    T::same(200, $accepted['status'], 'a company contact is accepted');
+
+    stubMode('contacts', 'down');
+    $down = request('GET', '/v1/contacts/stub-1', ['cmp_id' => (string) CMP]);
+    T::same(503, $down['status'], 'Contacts down is 503 retryable, not 404');
+    stubReset();
+}
+
+// ===========================================================================
+T::group('39. Campaign worker reads Contacts through a delegation grant (I-19, G18#1)');
+// ===========================================================================
+{
+    stubReset();
+    Context::resetForTesting();
+    $ctx = scope(CMP, $owner);
+    Auth::adopt($owner);
+    seedSettings(CMP, ['campaign_approval_required' => false]);
+    $connectionId = (int) Db::scalar('SELECT connection_id FROM voice_provider_connections WHERE cmp_id = :c ORDER BY connection_id LIMIT 1', ['c' => CMP]);
+
+    $campaignId = (int) Db::insert('voice_campaigns', [
+        'cmp_id' => CMP, 'name' => 'Delegation test', 'mode' => 'preview', 'status' => 'draft',
+        'connection_id' => $connectionId, 'timezone' => 'UTC',
+        'window_start_min' => 0, 'window_end_min' => 1440, 'window_days' => [0, 1, 2, 3, 4, 5, 6],
+        'max_concurrent' => 10, 'calls_per_minute' => 10, 'max_attempts' => 1,
+        'script' => ['body' => 'Hello', 'reviewed' => true, 'audience_purpose' => 'Requested callback'],
+    ], 'campaign_id');
+    foreach (['stub-1', 'gone', 'missing', 'national'] as $ref) {
+        Db::insert('voice_campaign_audience_refs', ['campaign_id' => $campaignId, 'cmp_id' => CMP, 'source' => 'contacts', 'external_ref' => $ref], 'audience_ref_id');
+    }
+
+    putenv('CONTACTS_SERVICE_KEY');
+    $noKey = CampaignService::act($ctx, $owner, $campaignId, 'start');
+    T::ok(!$noKey['ok'] && str_contains((string) $noKey['message'], 'CONTACTS_SERVICE_KEY'),
+        'without Voice\'s Contacts product key the campaign is refused, saying which setting is missing');
+
+    putenv('CONTACTS_SERVICE_KEY=test-voice-contacts-key');
+    $service = Auth::forTesting('service:crm', 'service', 'crm');
+    Context::trustForTesting(CMP, $service);
+    $byService = CampaignService::act($ctx, $service, $campaignId, 'start');
+    T::ok(!$byService['ok'] && str_contains((string) $byService['message'], 'signed-in person'),
+        'a product key cannot start it: a grant is issued by a person');
+
+    $started = CampaignService::act($ctx, $owner, $campaignId, 'start');
+    T::ok($started['ok'], 'the owner starts it, and Contacts grants access with their session');
+    $grant = Db::first("SELECT * FROM voice_directory_grants WHERE campaign_id = :id AND status = 'active'", ['id' => $campaignId]);
+    T::ok($grant !== null && str_starts_with((string) $grant['token_enc'], 'v1.'), 'the grant is stored, encrypted');
+    T::ok($grant !== null && !str_contains((string) $grant['token_enc'], 'dlg_'), 'and the token is never stored in the clear');
+
+    $worker = static function (int $campaignId): string {
+        return (string) shell_exec('CONTACTS_SERVICE_KEY=test-voice-contacts-key php ' . escapeshellarg(__DIR__ . '/../bin/campaign-worker.php')
+            . ' --campaign=' . $campaignId . ' 2>&1');
+    };
+    $out = $worker($campaignId);
+    $attempts = [];
+    foreach (Db::all('SELECT r.external_ref, a.status, a.skip_reason, a.dialled_e164 FROM voice_campaign_attempts a
+                        JOIN voice_campaign_audience_refs r ON r.audience_ref_id = a.audience_ref_id
+                       WHERE a.campaign_id = :id', ['id' => $campaignId]) as $row) {
+        $attempts[$row['external_ref']] = $row;
+    }
+    T::same('+919876500011', $attempts['stub-1']['dialled_e164'] ?? null, 'the worker dials a company contact read through the grant');
+    T::same('contact_gone', $attempts['gone']['skip_reason'] ?? null, 'a deleted contact is skipped as contact_gone, not re-queued forever');
+    T::same('skipped', $attempts['gone']['status'] ?? null, 'and its attempt is terminal');
+    T::same('no_number', $attempts['missing']['skip_reason'] ?? null, 'a contact with no phone is skipped as no_number');
+    T::same('+919876500012', $attempts['national']['dialled_e164'] ?? null, 'a nationally stored phone is dialled as company-region E.164');
+
+    // Expiry: the worker does not use a grant past its time; it pauses.
+    $ref2 = (int) Db::insert('voice_campaign_audience_refs', ['campaign_id' => $campaignId, 'cmp_id' => CMP, 'source' => 'contacts', 'external_ref' => 'stub-7'], 'audience_ref_id');
+    Db::insert('voice_campaign_attempts', ['campaign_id' => $campaignId, 'audience_ref_id' => $ref2, 'cmp_id' => CMP, 'attempt_no' => 1, 'status' => 'queued'], 'attempt_id');
+    Db::run("UPDATE voice_campaigns SET status = 'running' WHERE campaign_id = :id", ['id' => $campaignId]);
+    Db::run("UPDATE voice_directory_grants SET expires_at = NOW() - INTERVAL '1 minute' WHERE campaign_id = :id AND status = 'active'", ['id' => $campaignId]);
+    $worker($campaignId);
+    $campaign = Db::first('SELECT status, status_reason FROM voice_campaigns WHERE campaign_id = :id', ['id' => $campaignId]);
+    T::same('paused', $campaign['status'] ?? null, 'an expired grant pauses the campaign');
+    T::ok(str_starts_with((string) ($campaign['status_reason'] ?? ''), 'directory_access_expired'), 'with the reason, for a person to act on');
+    T::same('queued', Db::scalar('SELECT status FROM voice_campaign_attempts WHERE audience_ref_id = :r', ['r' => $ref2]),
+        'and the attempt is put back, not consumed');
+
+    // Renewal: resuming is the person's moment to renew.
+    $resumed = CampaignService::act($ctx, $owner, $campaignId, 'resume');
+    T::ok($resumed['ok'], 'the owner resumes it');
+    T::same(1, (int) Db::scalar("SELECT COUNT(*) FROM voice_directory_grants WHERE campaign_id = :id AND status = 'active'", ['id' => $campaignId]),
+        'which issues a fresh grant (exactly one active)');
+    $worker($campaignId);
+    T::same('dialling', Db::scalar('SELECT status FROM voice_campaign_attempts WHERE audience_ref_id = :r', ['r' => $ref2]),
+        'and the worker carries on with it');
+
+    // Refusal: Contacts says the grant is no longer valid (revoked, person left).
+    $ref3 = (int) Db::insert('voice_campaign_audience_refs', ['campaign_id' => $campaignId, 'cmp_id' => CMP, 'source' => 'contacts', 'external_ref' => 'stub-8'], 'audience_ref_id');
+    Db::insert('voice_campaign_attempts', ['campaign_id' => $campaignId, 'audience_ref_id' => $ref3, 'cmp_id' => CMP, 'attempt_no' => 1, 'status' => 'queued'], 'attempt_id');
+    Db::run("UPDATE voice_directory_grants SET token_enc = :t WHERE campaign_id = :id AND status = 'active'",
+        ['t' => \Aicountly\Api\Crypto::encrypt('dlg_expired'), 'id' => $campaignId]);
+    $worker($campaignId);
+    $campaign = Db::first('SELECT status, status_reason FROM voice_campaigns WHERE campaign_id = :id', ['id' => $campaignId]);
+    T::same('paused', $campaign['status'] ?? null, 'a grant Contacts refuses (401 delegation_invalid) pauses the campaign');
+    T::ok(str_starts_with((string) ($campaign['status_reason'] ?? ''), 'directory_access_invalid'), 'saying access was refused');
+    T::same(0, (int) Db::scalar("SELECT COUNT(*) FROM voice_directory_grants WHERE campaign_id = :id AND status = 'active'", ['id' => $campaignId]),
+        'and the refused grant is retired');
+
+    // Outage: bounded, backed-off, counted — and it ends.
+    CampaignService::act($ctx, $owner, $campaignId, 'resume');
+    stubMode('contacts', 'down');
+    $worker($campaignId);
+    $row = Db::first('SELECT status, defer_count, scheduled_for > NOW() AS later FROM voice_campaign_attempts WHERE audience_ref_id = :r', ['r' => $ref3]);
+    T::same('queued', $row['status'] ?? null, 'a Contacts outage defers the attempt');
+    T::same(1, (int) ($row['defer_count'] ?? 0), 'counts the deferral');
+    T::ok(in_array($row['later'] ?? null, [true, 't', 1, '1'], true), 'and backs off into the future');
+    Db::run('UPDATE voice_campaign_attempts SET defer_count = :n, scheduled_for = NOW() WHERE audience_ref_id = :r', ['n' => CampaignService::MAX_DEFERRALS, 'r' => $ref3]);
+    $worker($campaignId);
+    $row = Db::first('SELECT status, skip_reason FROM voice_campaign_attempts WHERE audience_ref_id = :r', ['r' => $ref3]);
+    T::same('directory_unavailable', $row['skip_reason'] ?? null, 'after the last deferral it is skipped as directory_unavailable, not looped');
+    stubReset();
+
+    T::same(0, (int) Db::scalar("SELECT COUNT(*) FROM voice_campaign_attempts WHERE campaign_id = :id AND status = 'queued'", ['id' => $campaignId]),
+        'nothing is left queued: every attempt was dialled, skipped with a reason, or ended');
+    putenv('CONTACTS_SERVICE_KEY');
+}
+
+// ===========================================================================
+T::group('40. Inbound calls are created and callers identified by company lookup (G18#4)');
+// ===========================================================================
+{
+    stubReset();
+    Context::resetForTesting();
+    $ctx = scope(CMP, $owner);
+    Auth::adopt($owner);
+    $connectionId = (int) Db::scalar('SELECT connection_id FROM voice_provider_connections WHERE cmp_id = :c ORDER BY connection_id LIMIT 1', ['c' => CMP]);
+
+    // The real webhook route, over HTTP, with a signed gateway event.
+    $port = (int) (getenv('STUB_PORT') ?: 8794) + 7;
+    $docroot = sys_get_temp_dir() . '/voice-webhook-' . getmypid();
+    @mkdir($docroot);
+    @symlink(dirname(__DIR__), $docroot . '/api');
+    $server = proc_open(['php', '-S', '127.0.0.1:' . $port, '-t', $docroot, $docroot . '/api/index.php'], [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+    for ($i = 0; $i < 40 && @fsockopen('127.0.0.1', $port) === false; $i++) {
+        usleep(100000);
+    }
+    $send = static function (array $event) use ($port, $connectionId): array {
+        $payload = (string) json_encode($event);
+        $ts = (string) time();
+        $ch = curl_init('http://127.0.0.1:' . $port . '/api/webhooks/telephony/' . $connectionId);
+        curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $payload, CURLOPT_RETURNTRANSFER => true, CURLOPT_HTTPHEADER => [
+            'Content-Type: application/json',
+            'X-Voice-Timestamp: ' . $ts,
+            'X-Voice-Signature: ' . hash_hmac('sha256', $ts . '.' . $payload, 'stub-signing-secret'),
+        ]]);
+        $body = (string) curl_exec($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+
+        return ['status' => $status, 'body' => json_decode($body, true) ?: []];
+    };
+
+    $first = $send(['event_id' => 'in-1', 'event' => 'call.inbound', 'leg_ref' => 'leg-in-1', 'from' => '98765 00011', 'to' => '+918066000001']);
+    T::same(200, $first['status'], 'a signed call.inbound event is accepted');
+    $call = Db::first("SELECT * FROM voice_calls WHERE cmp_id = :c AND direction = 'inbound' ORDER BY call_id DESC LIMIT 1", ['c' => CMP]);
+    T::ok($call !== null, 'and creates an inbound call row');
+    T::same('+919876500011', $call['remote_e164'] ?? null, 'the caller id read in the company region');
+    T::same('ringing', $call['state'] ?? null, 'ringing');
+    T::same('not_attempted', $call['contact_lookup_state'] ?? null, 'and no lookup claimed yet — the webhook never asks Contacts');
+    T::same(null, $call['contact_ref'] ?? null, 'so nothing is linked by the carrier callback');
+    $replay = $send(['event_id' => 'in-1b', 'event' => 'call.inbound', 'leg_ref' => 'leg-in-1', 'from' => '98765 00011', 'to' => '+918066000001']);
+    T::same(1, (int) Db::scalar("SELECT COUNT(*) FROM voice_call_legs WHERE provider_leg_ref = 'leg-in-1'"), 'the same leg twice is one call');
+    proc_terminate($server);
+    @unlink($docroot . '/api');
+    @rmdir($docroot);
+
+    $callId = (int) $call['call_id'];
+    $id = request('POST', '/v1/calls/' . $callId . '/identify', ['cmp_id' => (string) CMP]);
+    T::same('matched', $id['body']['data']['state'] ?? null, 'the console identifies the caller: exactly one company contact holds the number');
+    T::same('Stub One', $id['body']['data']['contact']['display_name'] ?? null, 'and shows the name read live');
+    T::same('stub-1', Db::scalar('SELECT contact_ref FROM voice_calls WHERE call_id = :id', ['id' => $callId]), 'contact_ref is stored (the id, never the name)');
+
+    $shared = InboundTest::call(CMP, '+919876500099');
+    $amb = request('POST', '/v1/calls/' . $shared . '/identify', ['cmp_id' => (string) CMP]);
+    T::same('ambiguous', $amb['body']['data']['state'] ?? null, 'two contacts with the number: ambiguous');
+    T::same(2, count($amb['body']['data']['candidates'] ?? []), 'the candidates are offered to a person');
+    T::same(null, Db::scalar('SELECT contact_ref FROM voice_calls WHERE call_id = :id', ['id' => $shared]), 'and NOTHING is linked automatically');
+
+    $unknown = InboundTest::call(CMP, '+919876500055');
+    $none = request('POST', '/v1/calls/' . $unknown . '/identify', ['cmp_id' => (string) CMP]);
+    T::same('no_match', $none['body']['data']['state'] ?? null, 'an unknown number is no_match — only now may the console say "not linked"');
+    T::same(0, (int) Db::scalar("SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'public' AND tablename LIKE '%contact%'"), 'and no contact is created anywhere in Voice');
+
+    stubMode('contacts', 'down');
+    $later = InboundTest::call(CMP, '+919876500056');
+    $down = request('POST', '/v1/calls/' . $later . '/identify', ['cmp_id' => (string) CMP]);
+    T::same('unavailable', $down['body']['data']['state'] ?? null, 'Contacts down is "unavailable", not "no match"');
+    stubReset();
+
+    $shown = request('GET', '/v1/calls/' . $later, ['cmp_id' => (string) CMP]);
+    T::same('unavailable', $shown['body']['data']['contact_lookup_state'] ?? null, 'and the call says so to every screen');
+}
+
+// ===========================================================================
+T::group('41. Service keys: route allow-list, company, actor and environment binding (G18#31)');
+// ===========================================================================
+{
+    stubReset();
+    Context::resetForTesting();
+    Auth::adopt(null);
+    clearHeaders();
+    putenv('SERVICE_KEYS=lobby:test-lobby-key-0123456789,crm:test-crm-key-0123456789');
+    putenv('PORTAL_AUTH_BASE=http://127.0.0.1:' . (getenv('STUB_PORT') ?: '8794'));
+    putenv('SERVICE_KEY_COMPANIES');
+    $lobby = ['X-Service-Key' => 'test-lobby-key-0123456789', 'X-AIC-Environment' => 'local'];
+    $callback = ['e164' => '+919876500123', 'reason' => 'Visitor asked for a callback'];
+
+    $r = request('POST', '/v1/callbacks', ['cmp_id' => (string) CMP], $callback, $lobby);
+    T::same(403, $r['status'], 'a product acting with no person may not act for a company not bound to it');
+    T::same('service_company_not_bound', $r['body']['error']['code'] ?? null, 'and says why');
+
+    clearHeaders();
+    putenv('SERVICE_KEY_COMPANIES=lobby:' . CMP);
+    $r = request('POST', '/v1/callbacks', ['cmp_id' => (string) CMP], $callback, $lobby + ['X-Actor-Uuid' => 'someone-else']);
+    T::ok(in_array($r['status'], [200, 201], true), 'bound to the company, Lobby books a callback (its one allowed route)');
+    $audit = Db::first("SELECT actor_uuid, actor_kind FROM voice_audit_events WHERE cmp_id = :c ORDER BY 1 DESC LIMIT 1", ['c' => CMP]);
+    T::ok(!in_array('someone-else', array_values($audit ?? []), true), 'a bare X-Actor-Uuid is never recorded as the actor');
+
+    clearHeaders();
+    $r = request('GET', '/v1/calls', ['cmp_id' => (string) CMP], [], $lobby);
+    T::same(403, $r['status'], 'Lobby may not read calls: not on its route list');
+    T::same('service_route_not_allowed', $r['body']['error']['code'] ?? null, 'refused by name');
+
+    clearHeaders();
+    $r = request('POST', '/v1/callbacks', ['cmp_id' => (string) CMP], $callback, ['X-Service-Key' => 'test-lobby-key-0123456789']);
+    T::same(401, $r['status'], 'a service call that does not say its environment is refused');
+    clearHeaders();
+    $r = request('POST', '/v1/callbacks', ['cmp_id' => (string) CMP], $callback, ['X-Service-Key' => 'test-lobby-key-0123456789', 'X-AIC-Environment' => 'production']);
+    T::same('service_environment_mismatch', $r['body']['error']['code'] ?? null, 'and so is one meant for another environment');
+
+    // CRM forwarding the person's own session: the person is verified, and
+    // Manage — asked with that session — binds the company.
+    clearHeaders();
+    $crm = ['X-Service-Key' => 'test-crm-key-0123456789', 'X-AIC-Environment' => 'local', 'Authorization' => 'Bearer crm-user-session'];
+    $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer crm-user-session';
+    $r = request('GET', '/v1/calls', ['cmp_id' => (string) OTHER_CMP], [], $crm);
+    T::same(200, $r['status'], 'CRM with the person\'s session reads calls in a company Manage says they belong to');
+    clearHeaders();
+    $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer crm-user-session';
+    $r = request('GET', '/v1/calls', ['cmp_id' => '999'], [], $crm);
+    T::same(403, $r['status'], 'but not in one Manage refuses them');
+    clearHeaders();
+    $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer crm-user-session';
+    $r = request('GET', '/v1/calls', ['cmp_id' => (string) OTHER_CMP], [], $crm + ['X-Actor-Uuid' => '999']);
+    T::same('actor_mismatch', $r['body']['error']['code'] ?? null, 'an X-Actor-Uuid that disagrees with the session is refused');
+    clearHeaders();
+    $_SERVER['HTTP_AUTHORIZATION'] = 'Bearer crm-user-session';
+    $r = request('GET', '/v1/recordings', ['cmp_id' => (string) OTHER_CMP], [], $crm);
+    T::same(403, $r['status'], 'and a CRM key never reaches recordings (not on its list)');
+
+    // The Voice Gateway's key reaches the AI action route and nothing else:
+    // main's route for it must survive the allow-list.
+    clearHeaders();
+    putenv('SERVICE_KEYS=lobby:test-lobby-key-0123456789,gateway:test-gateway-key-0123456789');
+    putenv('SERVICE_KEY_COMPANIES=gateway:' . CMP);
+    $gw = ['X-Service-Key' => 'test-gateway-key-0123456789', 'X-AIC-Environment' => 'local'];
+    $r = request('POST', '/v1/calls/999999/ai-actions', ['cmp_id' => (string) CMP], [], $gw);
+    T::ok(($r['body']['error']['code'] ?? null) !== 'service_route_not_allowed', 'the Gateway key is allowed the AI action route');
+    clearHeaders();
+    $r = request('GET', '/v1/calls', ['cmp_id' => (string) CMP], [], $gw);
+    T::same('service_route_not_allowed', $r['body']['error']['code'] ?? null, 'and nothing else: the Gateway key may not read calls');
+    clearHeaders();
+    $r = request('POST', '/v1/calls/999999/ai-actions', ['cmp_id' => (string) CMP], [], $lobby);
+    T::same(403, $r['status'], 'while another product\'s key may not run an AI agent\'s actions');
+
+    unset($_SERVER['HTTP_AUTHORIZATION']);
+    clearHeaders();
+    putenv('SERVICE_KEYS');
+    putenv('SERVICE_KEY_COMPANIES');
+    putenv('PORTAL_AUTH_BASE');
+    Context::resetForTesting();
+    Context::trustForTesting(CMP, $owner, true);
+    Auth::adopt($owner);
+}
+
+// ===========================================================================
+T::group('42. The live stream takes a single-use ticket, never the session key (G18#14, G18#24)');
+// ===========================================================================
+{
+    Context::resetForTesting();
+    Context::trustForTesting(CMP, $owner, true);
+    Auth::adopt($owner);
+    clearHeaders();
+    $minted = request('POST', '/v1/events/ticket', ['cmp_id' => (string) CMP]);
+    $ticket = (string) ($minted['body']['data']['ticket'] ?? '');
+    T::ok($minted['status'] === 200 && strlen($ticket) >= 40, 'an authenticated POST mints a ticket');
+    T::same(30, $minted['body']['data']['expires_in'] ?? null, 'that lives 30 seconds');
+    T::same(0, (int) Db::scalar('SELECT COUNT(*) FROM voice_stream_tickets WHERE ticket_hash = :t', ['t' => $ticket]), 'only its hash is stored');
+
+    Auth::adopt(null);
+    $_SERVER['REQUEST_URI'] = '/api/v1/events';
+    $_GET = ['ticket' => $ticket, 'cmp_id' => (string) CMP];
+    $streamAuth = Auth::resolve();
+    T::ok($streamAuth !== null && $streamAuth->uuid === USER, 'the stream resolves the user from the ticket');
+    T::same('', $streamAuth?->sesKey(), 'and holds no session key, so it cannot reach another product');
+    $_GET = ['ticket' => $ticket];
+    T::same(null, Auth::resolve(), 'the same ticket a second time is refused');
+
+    $other = request('POST', '/v1/events/ticket', ['cmp_id' => (string) CMP], [], []);
+    Auth::adopt($owner);
+    $other = request('POST', '/v1/events/ticket', ['cmp_id' => (string) CMP]);
+    Auth::adopt(null);
+    $_SERVER['REQUEST_URI'] = '/api/v1/events';
+    $_GET = ['ticket' => (string) ($other['body']['data']['ticket'] ?? '')];
+    $bound = Auth::resolve();
+    $refusal = null;
+    try {
+        Context::forCompany(OTHER_CMP)->assertAllowed($bound);
+    } catch (\Aicountly\Api\ResponseSent $sent) {
+        $refusal = $sent->status;
+    }
+    T::same(403, $refusal, 'a ticket opens the stream for its own company only');
+
+    Db::run("UPDATE voice_stream_tickets SET expires_at = NOW() - INTERVAL '1 second' WHERE used_at IS NULL");
+    Auth::adopt($owner);
+    $late = request('POST', '/v1/events/ticket', ['cmp_id' => (string) CMP]);
+    Db::run("UPDATE voice_stream_tickets SET expires_at = NOW() - INTERVAL '1 second' WHERE used_at IS NULL");
+    Auth::adopt(null);
+    $_GET = ['ticket' => (string) ($late['body']['data']['ticket'] ?? '')];
+    T::same(null, Auth::resolve(), 'an expired ticket is refused');
+
+    $_GET = ['access_token' => 'test-ses-key-' . USER];
+    T::same(null, Auth::resolve(), 'a session key in the stream URL no longer authenticates anything');
+
+    $_GET = [];
+    Auth::adopt($owner);
+    $source = (string) file_get_contents(dirname(__DIR__, 2) . '/web/src/services/api.ts');
+    T::ok(!str_contains($source, "'access_token'"), 'and the SPA no longer puts the session key in the stream URL');
 }
 
 // ===========================================================================
@@ -1851,7 +2426,7 @@ T::group('28. A callback request is claimed before it runs');
 // ===========================================================================
 {
     Auth::adopt($person);
-    Context::trustForTesting(CMP, $person);
+    Context::trustForTesting(CMP, $person, true);
     $post = static fn (array $body, string $key): array
         => request('POST', '/v1/callbacks', ['cmp_id' => (string) CMP], $body, ['Idempotency-Key' => $key]);
     $count = static fn (string $e164): int => (int) Db::scalar('SELECT COUNT(*) FROM voice_callbacks WHERE e164 = :n', ['n' => $e164]);
@@ -1895,7 +2470,7 @@ T::group('29. Before migration 010, callbacks work and the diary says why it can
 {
     stubReset();
     Auth::adopt($person);
-    Context::trustForTesting(CMP, $person);
+    Context::trustForTesting(CMP, $person, true);
     $before = count(calendarRequests());
     $seen = [];
     try {
@@ -2005,6 +2580,8 @@ T::group('31. An AI agent books through Appointments, once, or hands over');
     stubReset();
     $ctx = scope(CMP, $owner);
     $gateway = Auth::forTesting('service:gateway', 'service', 'gateway');
+    // The Gateway acts with no person, so the company must be bound to its key (ServicePolicy).
+    putenv('SERVICE_KEY_COMPANIES=gateway:' . CMP);
     $service = appointmentsSeedService(CMP, ['name' => 'Tax consultation']);
     $member = Uuid::v4();
     $at = static fn (int $days, int $hour, int $minute = 0): string => Clock::iso(Clock::now()->modify('+' . $days . ' days')->setTime($hour, $minute));
@@ -2197,6 +2774,7 @@ T::group('31. An AI agent books through Appointments, once, or hands over');
 
     Auth::adopt($owner);
     clearHeaders();
+    putenv('SERVICE_KEY_COMPANIES');
 }
 
 // ===========================================================================

@@ -79,14 +79,10 @@ if ($path === 'seskey' || $path === 'seskey/refresh') {
 }
 
 if ($path === 'validatesession') {
-    stub_json(200, [
-        'status'      => 1,
-        'uuid_aictly' => 'stub-user-uuid',
-        'name'        => 'Demo Operator',
-        'email'       => 'demo@example.invalid',
-        // acs_type 1 is a company owner, so the walkthrough sees every screen.
-        'acs_type'    => 1,
-    ]);
+    // The REAL contract (my-aicountly-com AuthController::validateSession):
+    // status, an INTEGER uuid_aictly and the key — no name, no e-mail and no
+    // acs_type. Ownership is Manage's to say, in companyinfo below.
+    stub_json(200, ['status' => 1, 'uuid_aictly' => 101, 'ses_key' => 'stub-ses-key']);
 }
 
 if ($path === 'companies') {
@@ -97,52 +93,151 @@ if ($path === 'companies') {
 }
 
 // ---------------------------------------------------------------------------
-// Manage — the tenant check
+// Manage — the tenant check, in Manage's real companyinfo shape
+// (manage-aicountly CompanyModel::companyInfo; 404 for a non-member).
 // ---------------------------------------------------------------------------
 if (str_starts_with($path, 'companyinfo')) {
     $cmpId = (int) ($_GET['comp_id'] ?? 0);
+    $bearer = preg_match('/Bearer\s+(.+)/i', (string) ($_SERVER['HTTP_AUTHORIZATION'] ?? ''), $m) === 1 ? trim($m[1]) : '';
 
-    // Company 999 is the one this session may NOT open — that is what the
-    // tenant-isolation test uses.
+    // 999: this session may NOT open it — Manage says 404, "not found or access denied".
     if ($cmpId === 999) {
-        stub_json(403, ['message' => 'No access to that company.']);
+        stub_json(404, ['success' => false, 'message' => 'Company not found or access denied']);
+    }
+    // 998: Manage itself is failing.
+    if ($cmpId === 998) {
+        stub_json(502, ['message' => 'Bad gateway']);
+    }
+    // 997: an answer about a different company — never read as a yes.
+    if ($cmpId === 997) {
+        stub_json(200, ['success' => '1', 'data' => ['comp_id' => 1, 'cmp_id' => 1]]);
     }
 
-    stub_json(200, ['data' => ['cmp_id' => $cmpId, 'name' => 'Stub Company ' . $cmpId]]);
+    // The owner of every stub company is user-aaa (the suite's USER) and the
+    // walkthrough's portal user; everybody else is a shared member.
+    $owner = in_array($bearer, ['test-ses-key-user-aaa', 'stub-ses-key'], true);
+    stub_json(200, ['success' => '1', 'data' => [
+        'comp_id'     => $cmpId,
+        'cmp_id'      => $cmpId,
+        'comp_name'   => 'Stub Company ' . $cmpId,
+        'branch_list' => [],
+        'fy_list'     => [],
+        'is_creator'  => $owner,
+        'ownership'   => $owner ? 'owner' : 'shared',
+        'access_type' => $owner ? 1 : 2,
+    ]]);
 }
 
 // ---------------------------------------------------------------------------
-// Contacts
+// Contacts — contract v1, COMPANY endpoints, in the shape the real serializer
+// emits (ContactApiSerializer::companyContactToApi). The conformance run against
+// the REAL Contacts handlers is tests/contacts-conformance.php (e2e harness);
+// this stub only lets the domain suite run without one.
 // ---------------------------------------------------------------------------
-if (str_starts_with($path, 'contacts')) {
+function stub_contact(string $id, string $name, array $phones, int $cmp, string $state = 'active', ?string $into = null): array
+{
+    return [
+        'id' => $id, 'displayName' => $name, 'contactKind' => 'personal', 'organizationName' => '',
+        'ecosystemRoles' => [], 'categories' => [], 'tags' => [],
+        'phones' => array_map(static fn (string $p): array => ['value' => $p], $phones),
+        'emails' => [], 'addresses' => [], 'socialLinks' => [], 'note' => '',
+        'aicountlyOnly' => true, 'syncEligible' => false, 'source' => 'aicountly',
+        'archivedAt' => null, 'platformUserId' => null, 'platformUserUuid' => null, 'integrationMeta' => [],
+        'version' => 1, 'state' => $state, 'mergedIntoId' => $into,
+        'cmpId' => $cmp, 'visibility' => 'company', 'taxIds' => [], 'createdBy' => '101',
+    ];
+}
+
+if (preg_match('#^companies/(\d+)/(contacts|delegations)(/.*)?$#', $path, $cm) === 1) {
     if (stub_mode('contacts') === 'down') {
-        stub_json(503, ['message' => 'Contacts is unavailable.']);
+        stub_json(503, ['status' => 0, 'error' => ['code' => 'service_unavailable', 'message' => 'Contacts is unavailable.'], 'message' => 'Contacts is unavailable.']);
+    }
+    $cmp = (int) $cm[1];
+    $rest = trim($cm[3] ?? '', '/');
+    $auth = (string) ($_SERVER['HTTP_AUTHORIZATION'] ?? '');
+    if (str_starts_with($auth, 'Delegation ')) {
+        if (($_SERVER['HTTP_X_AIC_SERVICE'] ?? '') !== 'voice' || trim(substr($auth, 11)) === 'dlg_expired') {
+            stub_json(401, ['status' => 0, 'error' => ['code' => 'delegation_invalid', 'message' => 'Delegation is not valid.'], 'message' => 'Delegation is not valid.']);
+        }
+    } elseif (!str_starts_with($auth, 'Bearer ') || trim(substr($auth, 7)) === '') {
+        stub_json(401, ['status' => 0, 'error' => ['code' => 'unauthorized', 'message' => 'Unauthorized'], 'message' => 'Unauthorized']);
     }
 
-    $segments = explode('/', $path);
-    $ref = $segments[1] ?? '';
-
-    if ($method === 'POST') {
-        stub_json(201, ['data' => ['contact_uuid' => 'stub-contact-created', 'mobile' => '+919876500011']]);
+    if ($cm[2] === 'delegations') {
+        if ($method === 'POST') {
+            stub_json(201, ['status' => 1, 'data' => [
+                'grantId' => 'grant-' . substr(hash('sha256', (string) microtime(true)), 0, 8),
+                'token' => 'dlg_stub_' . bin2hex(random_bytes(6)),
+                'expiresAt' => gmdate('Y-m-d\TH:i:s\Z', time() + (int) ($body['ttlSeconds'] ?? 28800)),
+                'scopes' => $body['scopes'] ?? [], 'cmpId' => $cmp, 'product' => 'voice', 'actor' => '101', 'environment' => 'local',
+            ]]);
+        }
+        http_response_code(204);
+        exit;
     }
 
-    if ($ref !== '') {
+    if ($rest === 'lookup') {
+        $phone = (string) ($_GET['phone'] ?? '');
+        $rows = match ($phone) {
+            '+919876500011' => [stub_contact('stub-1', 'Stub One', ['+919876500011'], $cmp)],
+            '+919876500099' => [stub_contact('stub-2', 'Shared Desk A', ['+919876500099'], $cmp), stub_contact('stub-3', 'Shared Desk B', ['+919876500099'], $cmp)],
+            default => [],
+        };
+        stub_json(200, ['status' => 1, 'data' => $rows, 'meta' => ['matchCount' => count($rows)]]);
+    }
+
+    if ($rest === 'resolve' && $method === 'POST') {
+        $out = [];
+        foreach ((array) ($body['ids'] ?? []) as $id) {
+            $id = (string) $id;
+            $out[] = str_starts_with($id, 'stub-')
+                ? ['id' => $id, 'state' => 'active', 'survivorId' => $id, 'contact' => stub_contact($id, 'Stub ' . $id, ['+919876500011'], $cmp)]
+                : ['id' => $id, 'state' => 'unknown', 'survivorId' => null];
+        }
+        stub_json(200, ['status' => 1, 'data' => $out]);
+    }
+
+    if ($rest === 'find-or-create' && $method === 'POST') {
+        if (trim((string) ($body['displayName'] ?? '')) === '' && empty($body['phones']) && empty($body['emails'])) {
+            stub_json(400, ['status' => 0, 'error' => ['code' => 'validation_failed', 'message' => 'displayName is required.', 'details' => ['fields' => ['displayName' => 'required']]], 'message' => 'displayName is required.']);
+        }
+        stub_json(201, ['status' => 1, 'created' => true, 'data' => stub_contact(
+            'stub-created', (string) ($body['displayName'] ?? ''), array_column((array) ($body['phones'] ?? []), 'value'), $cmp,
+        )]);
+    }
+
+    if (preg_match('#^([^/]+)/resolve$#', $rest, $rm) === 1) {
+        stub_json(200, ['status' => 1, 'data' => match ($rm[1]) {
+            'merged-old' => ['id' => 'merged-old', 'state' => 'merged', 'survivorId' => 'stub-1'],
+            'gone'       => ['id' => 'gone', 'state' => 'deleted', 'survivorId' => null],
+            default      => ['id' => $rm[1], 'state' => 'unknown', 'survivorId' => null],
+        }]);
+    }
+
+    if ($rest !== '' && $method === 'GET') {
+        if (in_array($rest, ['gone', 'merged-old'], true) || str_starts_with($rest, 'private-')) {
+            stub_json(404, ['status' => 0, 'error' => ['code' => 'not_found', 'message' => 'Contact not found.'], 'message' => 'Contact not found.']);
+        }
         // 'missing' has no number, which is a different outcome from the
         // directory being down.
-        if ($ref === 'missing') {
-            stub_json(200, ['data' => ['contact_uuid' => $ref, 'name' => 'No Number']]);
+        if ($rest === 'missing') {
+            stub_json(200, ['status' => 1, 'data' => stub_contact('missing', 'No Number', [], $cmp)]);
         }
-
-        stub_json(200, ['data' => [
-            'contact_uuid' => $ref,
-            'name'         => 'Stub Contact',
-            'mobile'       => '+919876500011',
-        ]]);
+        // Stored nationally (an import), to prove Voice reads it in the company region.
+        if ($rest === 'national') {
+            stub_json(200, ['status' => 1, 'data' => stub_contact('national', 'National Format', ['98765 00012'], $cmp)]);
+        }
+        stub_json(200, ['status' => 1, 'data' => stub_contact($rest, 'Stub Contact', ['+919876500011'], $cmp)]);
     }
 
-    stub_json(200, ['data' => [
-        ['contact_uuid' => 'stub-1', 'name' => 'Stub One', 'mobile' => '+919876500011'],
-    ], 'meta' => ['total' => 1]]);
+    stub_json(200, ['status' => 1, 'data' => [stub_contact('stub-1', 'Stub One', ['+919876500011'], $cmp)],
+        'meta' => ['page' => 1, 'per_page' => 20, 'total' => 1, 'total_pages' => 1]]);
+}
+
+// The PERSONAL book must never be asked by Voice; answering loudly makes a
+// regression visible.
+if (str_starts_with($path, 'contacts')) {
+    stub_json(410, ['status' => 0, 'error' => ['code' => 'personal_book_not_for_voice', 'message' => 'Voice must use the company endpoints.']]);
 }
 
 // ---------------------------------------------------------------------------

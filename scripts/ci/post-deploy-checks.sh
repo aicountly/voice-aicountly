@@ -47,6 +47,12 @@ check json "Voice API (${target})" "${base}/api/health" \
   '.data.app == "Voice"' \
   '.data.status == "ok"'
 
+# The server says it is the environment this workflow deployed to (fatal). Sibling hosts — the
+# Manage tenant check included — follow AIC_ENVIRONMENT in api/.env and never the request's Host,
+# so a sandbox .env copied from the production template would otherwise talk to production.
+check json "Voice API environment (${target})" "${base}/api/health" \
+  ".data.env == \"${target}\""
+
 # The web root serves the build just deployed, or at least the Voice page (fatal).
 if [ -n "$entry" ]; then
   check page "Voice web (${target})" "${base}/" "$entry"

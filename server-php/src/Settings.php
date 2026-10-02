@@ -54,11 +54,11 @@ final class Settings
                 ai_disclosure, ai_disclosure_text, recording_retention_days,
                 transcript_retention_days, calling_window_start_min, calling_window_end_min,
                 calling_window_days, supervisor_monitoring, campaign_approval_required,
-                max_concurrent_calls, wrap_up_seconds, updated_at, updated_by
+                max_concurrent_calls, wrap_up_seconds, default_phone_region, updated_at, updated_by
              ) VALUES (
                 :cmp, :tz, :cur, :rec_policy, :rec_disc, :ai_disc, :ai_text, :rec_days,
                 :tr_days, :win_start, :win_end, :win_days, :sup_mon, :camp_appr,
-                :max_conc, :wrap, NOW(), :by
+                :max_conc, :wrap, :region, NOW(), :by
              )
              ON CONFLICT (cmp_id) DO UPDATE SET
                 timezone = EXCLUDED.timezone,
@@ -76,6 +76,7 @@ final class Settings
                 campaign_approval_required = EXCLUDED.campaign_approval_required,
                 max_concurrent_calls = EXCLUDED.max_concurrent_calls,
                 wrap_up_seconds = EXCLUDED.wrap_up_seconds,
+                default_phone_region = EXCLUDED.default_phone_region,
                 updated_at = NOW(),
                 updated_by = EXCLUDED.updated_by',
             [
@@ -95,6 +96,7 @@ final class Settings
                 'camp_appr'  => $merged['campaign_approval_required'] ? 'true' : 'false',
                 'max_conc'   => $merged['max_concurrent_calls'],
                 'wrap'       => $merged['wrap_up_seconds'],
+                'region'     => $merged['default_phone_region'],
                 'by'         => $actor,
             ],
         );
@@ -143,6 +145,18 @@ final class Settings
             $out['calling_window_days'] = array_values($days);
         }
 
+        // The region national numbers are read in. '' clears it back to the
+        // server default; anything we cannot apply is not stored, because an
+        // unknown region would silently refuse every national number.
+        if (array_key_exists('default_phone_region', $values)) {
+            $raw = trim((string) $values['default_phone_region']);
+            if ($raw === '') {
+                $out['default_phone_region'] = null;
+            } elseif (($region = \Aicountly\Api\Support\PhoneNumber::region($raw)) !== null) {
+                $out['default_phone_region'] = $region;
+            }
+        }
+
         // A recording policy this product does not implement must not be stored:
         // an unrecognised value would read as "not never" somewhere downstream.
         if (isset($out['recording_policy'])
@@ -174,6 +188,9 @@ final class Settings
             'campaign_approval_required' => self::bool($row['campaign_approval_required'] ?? true),
             'max_concurrent_calls'       => (int) ($row['max_concurrent_calls'] ?? 0),
             'wrap_up_seconds'            => (int) ($row['wrap_up_seconds'] ?? 60),
+            // NULL = not set for this company; CallingPolicy::regionFor falls back.
+            'default_phone_region'       => isset($row['default_phone_region']) && $row['default_phone_region'] !== ''
+                ? (string) $row['default_phone_region'] : null,
             'configured'                 => $row !== null,
         ];
     }

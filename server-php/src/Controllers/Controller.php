@@ -28,6 +28,7 @@ abstract class Controller
     protected static function enter(?string $permission = null): array
     {
         $auth = Auth::require();
+        self::assertServiceRoute($auth);
         $ctx = Context::fromRequest();
         $ctx->assertAllowed($auth);
 
@@ -41,7 +42,18 @@ abstract class Controller
     /** Authenticate without a company scope — the endpoints that take none. */
     protected static function enterUnscoped(): Auth
     {
-        return Auth::require();
+        $auth = Auth::require();
+        self::assertServiceRoute($auth);
+
+        return $auth;
+    }
+
+    /** A product key reaches only the routes listed for it in ServicePolicy. */
+    private static function assertServiceRoute(Auth $auth): void
+    {
+        if ($auth->isService() && \Aicountly\Api\ServicePolicy::grants($auth->sourceApp) === null) {
+            Http::error(403, 'service_route_not_allowed', 'This product\'s key may not call this route.');
+        }
     }
 
     /**

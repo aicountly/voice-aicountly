@@ -34,6 +34,7 @@ const Recordings = lazy(() => import('./pages/Workspace').then((module) => ({ de
 const Integrations = lazy(() => import('./pages/Workspace').then((module) => ({ default: module.Integrations })))
 const Settings = lazy(() => import('./pages/Workspace').then((module) => ({ default: module.Settings })))
 const Audit = lazy(() => import('./pages/Workspace').then((module) => ({ default: module.Audit })))
+const Access = lazy(() => import('./pages/Workspace').then((module) => ({ default: module.Access })))
 const Reports = lazy(() => import('./pages/Workspace').then((module) => ({ default: module.Reports })))
 
 /**
@@ -85,6 +86,7 @@ export default function App() {
             <Route path="integrations" element={<Integrations />} />
             <Route path="settings" element={<Settings />} />
             <Route path="audit" element={<Audit />} />
+            <Route path="access" element={<Access />} />
 
             {/* The portal callback path and anything unknown land on the
                 Command Centre rather than a 404 nobody can act on. */}

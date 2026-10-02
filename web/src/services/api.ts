@@ -269,19 +269,27 @@ export const api = {
 
   put: <T>(path: string, body?: unknown, options?: Omit<RequestOptions, 'method' | 'body'>) =>
     send<T>(path, { ...options, method: 'PUT', body }),
+
+  del: <T>(path: string, params?: QueryParams) =>
+    send<T>(path, { method: 'DELETE', params }),
 }
 
-/** The SSE endpoint, with the scope and the session on the query string. */
+/**
+ * The SSE endpoint URL, with a single-use 30-second ticket on it.
+ *
+ * EventSource cannot set headers, and the session key must never travel in a
+ * URL (access logs, proxies, history). So the ticket is asked for over an
+ * ordinary authenticated POST — session in the Authorization header — and only
+ * the ticket goes on the stream URL. A new ticket is minted per (re)connect.
+ */
 export async function eventStreamUrl(lastEventId?: number): Promise<string> {
-  const sesKey = await ensureSesKey()
+  const minted = await api.post<{ data: { ticket: string } }>('v1/events/ticket')
   const url = new URL(`${getApiBaseUrl()}/v1/events`, window.location.origin)
   if (scope) {
     url.searchParams.set('cmp_id', String(scope.cmp_id))
     url.searchParams.set('bo_id', String(scope.bo_id))
   }
   if (lastEventId) url.searchParams.set('last_event_id', String(lastEventId))
-  // EventSource cannot set headers, so the key travels as a parameter on a
-  // same-origin request. The backend accepts either.
-  url.searchParams.set('access_token', sesKey)
+  url.searchParams.set('ticket', minted.data.ticket)
   return url.toString()
 }

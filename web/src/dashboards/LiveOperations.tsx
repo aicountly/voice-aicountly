@@ -292,15 +292,7 @@ function SelectedCall({ call, controls, transcription, timezone, onReload }: {
         }
       />
 
-      {call.contact_ref ? (
-        <p className="vmuted vsmall" style={{ textAlign: 'center' }}>
-          Linked to a contact in Aicountly Contacts — open Contacts for their details.
-        </p>
-      ) : (
-        <p className="vmuted vsmall" style={{ textAlign: 'center' }}>
-          This number is not linked to a contact.
-        </p>
-      )}
+      <CallerIdentity call={call} />
 
       <div style={{ marginTop: 16 }}>
         <VoiceCallControls
@@ -343,4 +335,41 @@ function SelectedCall({ call, controls, transcription, timezone, onReload }: {
       </div>
     </Card>
   )
+}
+
+/**
+ * Who is calling, said only as far as somebody has actually looked (G18#4).
+ *
+ * An inbound call nobody has looked up yet is looked up NOW, with this agent's
+ * session, by a company lookup in Aicountly Contacts. "Not linked" appears only
+ * after Contacts answered that nobody holds the number; two contacts sharing it
+ * are never picked between automatically; an outage says so.
+ */
+function CallerIdentity({ call }: { call: Call }) {
+  const { company, branchId } = useVoice()
+  const needsLookup = call.direction === 'inbound' && !call.contact_ref
+    && (call.contact_lookup_state == null || call.contact_lookup_state === 'not_attempted' || call.contact_lookup_state === 'unavailable')
+
+  const lookup = useApi<{ data: { state: string; contact: { display_name: string } | null; candidates: Array<{ id: string; display_name: string }>; message: string | null } }>(
+    (signal) => api.post(`v1/calls/${call.call_id}/identify`, undefined, { signal }),
+    [company?.cmp_id, branchId, call.call_id],
+    { enabled: needsLookup || Boolean(call.contact_ref) },
+  )
+
+  const result = lookup.data?.data
+  const state = result?.state ?? call.contact_lookup_state ?? (call.contact_ref ? 'matched' : null)
+  const say = (text: string) => <p className="vmuted vsmall" style={{ textAlign: 'center' }}>{text}</p>
+
+  if (lookup.loading && !result) return say('Looking this number up in Aicountly Contacts…')
+  if (state === 'matched') {
+    return say(result?.contact ? `${result.contact.display_name} — from Aicountly Contacts.` : 'Linked to a contact in Aicountly Contacts.')
+  }
+  if (state === 'no_match') return say('This number is not linked to a contact.')
+  if (state === 'ambiguous') {
+    const names = (result?.candidates ?? []).map((c) => c.display_name).join(', ')
+    return say(`Several contacts in this company have this number${names ? ` (${names})` : ''}, so none was linked automatically.`)
+  }
+  if (state === 'unavailable') return say('The contact directory could not be checked. The number is shown as it arrived.')
+  if (state === 'forbidden') return say('You cannot read this company’s contacts in Aicountly Contacts.')
+  return call.direction === 'inbound' ? say('This caller has not been looked up yet.') : say('No contact is attached to this call.')
 }

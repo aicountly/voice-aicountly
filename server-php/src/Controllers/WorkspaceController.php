@@ -69,15 +69,18 @@ final class WorkspaceController extends Controller
         [, $ctx] = self::enter('voice.numbers.manage');
         $body = Http::body();
 
-        $e164 = CallingPolicy::normalise((string) ($body['e164'] ?? ''));
+        // A business number is read in the country it is declared for.
+        $country = \Aicountly\Api\Support\PhoneNumber::region((string) ($body['country'] ?? ''))
+            ?? CallingPolicy::regionFor($ctx);
+        $e164 = CallingPolicy::normalise((string) ($body['e164'] ?? ''), $country);
         if ($e164 === null) {
-            Http::validationFailed('That is not a number in E.164 form.', ['e164' => 'Use +<country><number>.']);
+            Http::validationFailed('That is not a valid number.', ['e164' => 'Use +<country><number>, or a ' . $country . ' number.']);
         }
 
         $values = [
             'e164'             => $e164,
             'label'            => trim((string) ($body['label'] ?? '')),
-            'country'          => strtoupper(trim((string) ($body['country'] ?? 'IN'))),
+            'country'          => $country,
             'number_type'      => (string) ($body['number_type'] ?? 'landline'),
             'connection_id'    => isset($body['connection_id']) ? (int) $body['connection_id'] : null,
             'team_id'          => isset($body['team_id']) ? (int) $body['team_id'] : null,
@@ -351,6 +354,9 @@ final class WorkspaceController extends Controller
         [$auth, $ctx] = self::enter('voice.dashboard.view');
 
         Http::data(Settings::forCompany($ctx->cmpId) + [
+            // What a national number is actually read as, wherever it was set.
+            'effective_phone_region'  => CallingPolicy::regionFor($ctx),
+            'supported_phone_regions' => \Aicountly\Api\Support\PhoneNumber::supportedRegions(),
             'can_edit' => Permissions::allows($ctx, $auth, 'voice.settings.manage'),
             'policy_note' => 'These are settings this business chooses. Voice enforces what it is told; it does not certify that any combination meets a legal obligation.',
         ]);
@@ -423,9 +429,14 @@ final class WorkspaceController extends Controller
         [$auth, $ctx] = self::enter('voice.campaigns.manage');
         $body = Http::body();
 
-        $e164 = CallingPolicy::normalise((string) ($body['e164'] ?? ''));
+        // Read in the company's region, so a DND entry typed nationally
+        // suppresses the same E.164 a campaign would dial.
+        $e164 = CallingPolicy::normaliseFor($ctx, (string) ($body['e164'] ?? ''));
         if ($e164 === null) {
-            Http::validationFailed('That is not a number in E.164 form.');
+            Http::validationFailed(
+                'That is not a valid number.',
+                ['e164' => 'Use +<country><number>, or a ' . CallingPolicy::regionFor($ctx) . ' number.'],
+            );
         }
 
         CallingPolicy::suppress(
@@ -485,13 +496,17 @@ final class WorkspaceController extends Controller
     {
         [$auth, $ctx] = self::enter(null);
 
+        $manages = Permissions::allows($ctx, $auth, 'voice.access.manage');
+
         Http::data([
             'catalog'   => Permissions::CATALOG,
             'granted'   => Permissions::granted($ctx, $auth),
-            'grantable' => Permissions::allows($ctx, $auth, 'voice.access.manage')
-                ? Permissions::grantable($ctx, $auth)
-                : [],
-            'profiles'  => Permissions::allows($ctx, $auth, 'voice.access.manage')
+            // Who owns this company is Manage's answer (companyinfo), read with
+            // this session — not anything the portal session or the browser said.
+            'is_owner'  => $ctx->isOwner($auth),
+            'owner_source' => 'manage.companyinfo',
+            'grantable' => $manages ? Permissions::grantable($ctx, $auth) : [],
+            'profiles'  => $manages
                 ? array_map(
                     static fn (array $row): array => [
                         'profile_id'  => (int) $row['profile_id'],
@@ -507,7 +522,195 @@ final class WorkspaceController extends Controller
                     ),
                 )
                 : [],
+            'assignments' => $manages
+                ? array_map(
+                    static fn (array $row): array => [
+                        'profile_id' => (int) $row['profile_id'],
+                        'user_uuid'  => (string) $row['user_uuid'],
+                        'created_at' => $row['created_at'],
+                        'created_by' => $row['created_by'],
+                    ],
+                    Db::all(
+                        'SELECT profile_id, user_uuid, created_at, created_by
+                           FROM voice_permission_assignments WHERE cmp_id = :cmp ORDER BY user_uuid, profile_id',
+                        ['cmp' => $ctx->cmpId],
+                    ),
+                )
+                : [],
             'note' => 'Hiding a control in the browser is a courtesy. Every one of these is asserted again in the backend.',
         ]);
+    }
+
+    /**
+     * Create or edit a permission profile.
+     *
+     * The first profile in a company is created by its OWNER — whom Manage
+     * names, not the portal — which is what makes a fresh company usable
+     * without hand-written SQL (G18#5). Nobody can put a permission into a
+     * profile that they do not hold themselves.
+     */
+    public static function saveProfile(): never
+    {
+        [$auth, $ctx] = self::enter('voice.access.manage');
+
+        $body = Http::body();
+        $name = trim((string) ($body['name'] ?? ''));
+        if ($name === '' || mb_strlen($name) > 120) {
+            Http::validationFailed('A profile needs a name of up to 120 characters.');
+        }
+
+        $requested = is_array($body['permissions'] ?? null) ? $body['permissions'] : [];
+        $grantable = Permissions::grantable($ctx, $auth);
+
+        $permissions = [];
+        $refused = [];
+        foreach ($requested as $permission) {
+            if (!is_string($permission) || !Permissions::exists($permission)) {
+                continue;
+            }
+            if (in_array($permission, $grantable, true)) {
+                $permissions[$permission] = $permission;
+            } else {
+                $refused[] = $permission;
+            }
+        }
+        if ($refused !== []) {
+            Http::forbidden('You cannot grant permissions you do not hold yourself: ' . implode(', ', $refused) . '.');
+        }
+        $permissions = array_values($permissions);
+
+        $profileId = isset($body['profile_id']) ? (int) $body['profile_id'] : 0;
+        $isActive = !array_key_exists('is_active', $body) || (bool) $body['is_active'];
+
+        try {
+            if ($profileId > 0) {
+                $existing = Db::first(
+                    'SELECT * FROM voice_permission_profiles WHERE cmp_id = :cmp AND profile_id = :id',
+                    ['cmp' => $ctx->cmpId, 'id' => $profileId],
+                );
+                if ($existing === null) {
+                    Http::notFound('That profile could not be found.');
+                }
+                // Editing a profile is as good as granting what it now holds to
+                // everybody assigned it, so the same rule applies to what it held.
+                $wasHeld = Db::jsonColumn($existing['permissions'] ?? null);
+                $escalation = array_values(array_diff($wasHeld, $grantable));
+                if ($escalation !== []) {
+                    Http::forbidden('That profile holds permissions you do not (' . implode(', ', $escalation) . '), so you cannot edit it.');
+                }
+
+                Db::update('voice_permission_profiles', [
+                    'name'        => $name,
+                    'description' => trim((string) ($body['description'] ?? '')),
+                    'permissions' => $permissions,
+                    'is_active'   => $isActive,
+                    'updated_at'  => \Aicountly\Api\Support\Clock::sql(\Aicountly\Api\Support\Clock::now()),
+                ], ['cmp_id' => $ctx->cmpId, 'profile_id' => $profileId]);
+            } else {
+                $profileId = (int) Db::insert('voice_permission_profiles', [
+                    'cmp_id'      => $ctx->cmpId,
+                    'name'        => $name,
+                    'description' => trim((string) ($body['description'] ?? '')),
+                    'permissions' => $permissions,
+                    'is_active'   => $isActive,
+                ], 'profile_id');
+            }
+        } catch (\PDOException $e) {
+            if (str_contains($e->getMessage(), 'uq_voice_permission_profiles_cmp_name')) {
+                Http::conflict('A profile with that name already exists.', ['reason' => 'duplicate_name']);
+            }
+            throw $e;
+        }
+
+        Audit::record($ctx, $auth, Audit::ACCESS_CHANGED, 'permission_profile', (string) $profileId, [
+            'change'      => 'profile_saved',
+            'permissions' => $permissions,
+            'is_active'   => $isActive,
+        ]);
+        Permissions::forget();
+
+        Http::data(['profile_id' => $profileId, 'permissions' => $permissions], 201);
+    }
+
+    /** Give a person a profile in this company. */
+    public static function assignProfile(): never
+    {
+        [$auth, $ctx] = self::enter('voice.access.manage');
+
+        $body = Http::body();
+        $userUuid = trim((string) ($body['user_uuid'] ?? ''));
+        $profileId = (int) ($body['profile_id'] ?? 0);
+        // Platform user ids are my.aicountly's integer uuid_aictly, sent as a
+        // string; legacy uuids are accepted too. Nothing else is an identity.
+        if (preg_match('/^[A-Za-z0-9_-]{1,64}$/', $userUuid) !== 1 || $profileId <= 0) {
+            Http::validationFailed('user_uuid (the platform user id) and profile_id are required.');
+        }
+
+        $profile = Db::first(
+            'SELECT profile_id, permissions FROM voice_permission_profiles WHERE cmp_id = :cmp AND profile_id = :id',
+            ['cmp' => $ctx->cmpId, 'id' => $profileId],
+        );
+        if ($profile === null) {
+            Http::notFound('That profile could not be found.');
+        }
+
+        // Assigning a profile hands over everything in it, so it must hold
+        // nothing the caller could not grant one permission at a time.
+        $escalation = array_values(array_diff(Db::jsonColumn($profile['permissions'] ?? null), Permissions::grantable($ctx, $auth)));
+        if ($escalation !== []) {
+            Http::forbidden('That profile includes permissions you do not hold (' . implode(', ', $escalation) . '), so you cannot assign it.');
+        }
+
+        Db::run(
+            'INSERT INTO voice_permission_assignments (cmp_id, profile_id, user_uuid, created_by)
+             VALUES (:cmp, :profile, :uuid, :actor)
+             ON CONFLICT (cmp_id, profile_id, user_uuid) DO NOTHING',
+            ['cmp' => $ctx->cmpId, 'profile' => $profileId, 'uuid' => $userUuid, 'actor' => $auth->uuid],
+        );
+
+        Audit::record($ctx, $auth, Audit::ACCESS_CHANGED, 'permission_assignment', $userUuid, [
+            'change' => 'profile_assigned', 'profile_id' => $profileId,
+        ]);
+        Permissions::forget();
+
+        Http::data(['assigned' => true], 201);
+    }
+
+    /** Take a profile away from a person in this company. */
+    public static function revokeProfile(): never
+    {
+        [$auth, $ctx] = self::enter('voice.access.manage');
+
+        $userUuid = trim((string) (Http::param('user_uuid') ?? ''));
+        $profileId = Http::intParam('profile_id', 0) ?? 0;
+        if ($userUuid === '' || $profileId <= 0) {
+            Http::validationFailed('user_uuid and profile_id are required.');
+        }
+
+        $profile = Db::first(
+            'SELECT permissions FROM voice_permission_profiles WHERE cmp_id = :cmp AND profile_id = :id',
+            ['cmp' => $ctx->cmpId, 'id' => $profileId],
+        );
+        if ($profile === null) {
+            Http::notFound('That profile could not be found.');
+        }
+        // Revoking what you could not have granted is as much an access
+        // decision as granting it.
+        $escalation = array_values(array_diff(Db::jsonColumn($profile['permissions'] ?? null), Permissions::grantable($ctx, $auth)));
+        if ($escalation !== []) {
+            Http::forbidden('That profile includes permissions you do not hold, so you cannot revoke it.');
+        }
+
+        Db::run(
+            'DELETE FROM voice_permission_assignments WHERE cmp_id = :cmp AND user_uuid = :uuid AND profile_id = :profile',
+            ['cmp' => $ctx->cmpId, 'uuid' => $userUuid, 'profile' => $profileId],
+        );
+
+        Audit::record($ctx, $auth, Audit::ACCESS_CHANGED, 'permission_assignment', $userUuid, [
+            'change' => 'profile_revoked', 'profile_id' => $profileId,
+        ]);
+        Permissions::forget();
+
+        Http::data(['revoked' => true]);
     }
 }

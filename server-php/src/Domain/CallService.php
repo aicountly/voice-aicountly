@@ -54,9 +54,15 @@ final class CallService
      */
     public static function place(Context $ctx, Auth $auth, array $input): array
     {
-        $to = CallingPolicy::normalise((string) ($input['to'] ?? ''));
+        // A national number is read in the region of the business number the
+        // call goes out from, when one is named; otherwise the company's.
+        $to = CallingPolicy::normaliseFor($ctx, (string) ($input['to'] ?? ''), self::numberCountry($ctx, $input));
         if ($to === null) {
-            return self::fail('invalid_number', 'That is not a number this system can dial.');
+            return self::fail(
+                'invalid_number',
+                'That is not a number this system can dial. Use +<country code><number>, or a '
+                    . CallingPolicy::regionFor($ctx, self::numberCountry($ctx, $input)) . ' number.',
+            );
         }
 
         $policy = CallingPolicy::check($ctx, $to);
@@ -360,6 +366,11 @@ final class CallService
             'remote_masked'  => $row['remote_e164'] === null ? null : CallingPolicy::mask((string) $row['remote_e164']),
             'local_e164'     => $row['local_e164'],
             'contact_ref'    => $row['contact_ref'],
+            // What a lookup in Contacts found, so the console never claims "not
+            // linked" before anybody looked (G18#4). Never the contact's name.
+            'contact_lookup_state' => $row['contact_lookup_state'] ?? null,
+            'contact_lookup_at'    => $row['contact_lookup_at'] ?? null,
+            'contact_lookup_matches' => isset($row['contact_lookup_matches']) ? (int) $row['contact_lookup_matches'] : null,
             'crm_lead_ref'   => $row['crm_lead_ref'],
             'campaign_id'    => $row['campaign_id'] === null ? null : (int) $row['campaign_id'],
             'queue_id'       => $row['queue_id'] === null ? null : (int) $row['queue_id'],
@@ -493,5 +504,19 @@ final class CallService
         $value = is_scalar($value) ? trim((string) $value) : '';
 
         return $value === '' ? null : $value;
+    }
+
+    /** The country of the business number a call is placed from, when the request names one. */
+    private static function numberCountry(Context $ctx, array $input): ?string
+    {
+        if (!isset($input['number_id']) || (int) $input['number_id'] <= 0) {
+            return null;
+        }
+        $country = Db::scalar(
+            'SELECT country FROM voice_numbers WHERE number_id = :id AND cmp_id = :cmp',
+            ['id' => (int) $input['number_id'], 'cmp' => $ctx->cmpId],
+        );
+
+        return is_string($country) && $country !== '' ? $country : null;
     }
 }

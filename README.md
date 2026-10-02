@@ -115,6 +115,9 @@ with the signed-in user's own session: Pulse picks the model from Console,
 enforces the daily AI allowance and reports usage per feature (`call.summary`).
 Voice holds no model key, calls no model provider and has no fallback model —
 when Pulse cannot answer, the rule-based path does, and the screen says so.
+That statement covers THIS repository only: the separate Voice Gateway keeps its
+own speech/AI vendor keys for now — see
+[docs/VOICE_GATEWAY_AI_BOUNDARY.md](docs/VOICE_GATEWAY_AI_BOUNDARY.md).
 
 A consequential action — booking, rescheduling, taking a payment — can never be
 configured as merely "allowed"; the server forces it to require caller
@@ -221,9 +224,21 @@ second line of defence behind it.
 ## Tests
 
 ```bash
-server-php/tests/run.sh      # 393 assertions against a real PostgreSQL
+server-php/tests/run.sh      # 549 assertions against a real PostgreSQL
 cd web && npm run test:ui    # frontend unit tests
 ```
+
+Against the REAL Contacts, Manage and my.aicountly handlers (the e2e harness at
+`/home/user/e2e`, see its README), not a stub:
+
+```bash
+/home/user/e2e/bin/with-stack.sh --agent vm -- php server-php/tests/contacts-conformance.php
+/home/user/e2e/bin/with-stack.sh --agent vm -- php server-php/tests/e2e-campaign-worker.php <gateway stub port>
+```
+
+The Contacts client is the shared one, vendored from contacts-react-app
+(`server-php/src/Clients/vendor-contacts-client/`); keep it identical with
+`scripts/ci/contacts-client-drift-check.sh <file>`.
 
 The suite drives the real controllers through the real router with an adopted
 identity, so permission checks are exercised rather than bypassed. A local stub
@@ -274,10 +289,15 @@ without it. The ones with no safe default:
 - `VOICE_GATEWAY_URL` / `VOICE_GATEWAY_KEY` — no gateway means no browser
   calling and no live transcription, and the UI says so rather than showing
   controls that do nothing.
+- `AIC_ENVIRONMENT` — `production`, `sandbox` or `local` (falls back to
+  `APP_ENV`). It alone decides which Manage, Contacts, CRM, Calendar, Pay and
+  AI Pulse this API talks to; the request's Host header is never consulted.
+  Unset or unrecognised, Voice calls no other product at all and
+  `/api/health` says why.
 - `VOICE_AI_ENABLED` — off means no AI: the deterministic paths answer
   instead and the screen says the result is rule-based. On, AI runs through
   AI Pulse with the user's own session; there is no model key to set.
-  `PULSE_API_ORIGIN` is derived from the host unless set, and
+  `PULSE_API_ORIGIN` follows `AIC_ENVIRONMENT` unless set, and
   `PULSE_SERVICE_KEY` is needed only for AI a service caller (no user session)
   starts.
 
@@ -312,10 +332,10 @@ the app exchanges it for a short-lived `ses_key`. A user already signed in to
 another AICOUNTLY product lands straight on the dashboard.
 
 The `ses_key` lives in memory only and never reaches localStorage — that split is
-the whole point of the two-token model. The one exception is the SSE stream,
-where the browser's `EventSource` cannot set headers; the key travels as a query
-parameter on that route alone, same-origin, and the reasoning is written at
-`src/Auth.php`.
+the whole point of the two-token model — and it never travels in a URL. The SSE
+stream, whose `EventSource` cannot set headers, is opened with a single-use,
+30-second ticket minted by `POST /v1/events/ticket` (session in the header) and
+bound to the user and company; see `src/StreamTickets.php`.
 
 See [docs/auth/AICOUNTLY_AUTH_WORKFLOW.md](docs/auth/AICOUNTLY_AUTH_WORKFLOW.md).
 

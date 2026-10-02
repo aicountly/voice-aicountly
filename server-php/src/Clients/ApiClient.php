@@ -6,6 +6,7 @@ namespace Aicountly\Api\Clients;
 
 use Aicountly\Api\CrossServiceCallContext;
 use Aicountly\Api\Env;
+use Aicountly\Api\Environment;
 
 /**
  * Base for every outbound call to another AICOUNTLY product.
@@ -86,9 +87,13 @@ abstract class ApiClient
     /**
      * Where this product's sibling lives.
      *
-     * Derived from our own hostname so sandbox talks to sandbox without a second
-     * set of environment variables to keep in step — an explicit env override
-     * still wins, for local development and for a one-off cutover.
+     * From CONFIGURATION ONLY: an explicit `*_API_BASE`, else the sibling's
+     * production or sandbox host for the environment this server is configured
+     * as (see Environment). Never from the request's Host header — that is a
+     * claim, and it used to decide which Manage answered the tenant check.
+     *
+     * Returns '' when the environment is not configured; request() then
+     * refuses without calling anybody.
      */
     public function base(): string
     {
@@ -97,20 +102,20 @@ abstract class ApiClient
             return rtrim($configured, '/');
         }
 
-        $host = strtolower((string) ($_SERVER['HTTP_HOST'] ?? ''));
-        $host = explode(':', preg_replace('/^www\./', '', $host) ?? '')[0];
-
-        if (str_contains($host, '.gh.aicountly.com') || str_starts_with($host, 'gh-') || $host === '' || str_contains($host, 'localhost') || str_starts_with($host, '127.')) {
-            return $this->sandboxBase();
-        }
-
-        return $this->productionBase();
+        return match (Environment::siblingTier()) {
+            'production' => $this->productionBase(),
+            'sandbox'    => $this->sandboxBase(),
+            default      => '',
+        };
     }
 
     /** The API root. A configured base may already include /api, and a local spark origin serves it at the root. */
     public function apiRoot(): string
     {
         $base = $this->base();
+        if ($base === '') {
+            return '';
+        }
         if (preg_match('#/api$#', $base) === 1 || preg_match('#^https?://(127\.0\.0\.1|localhost)(:\d+)?$#', $base) === 1) {
             return $base;
         }
@@ -139,7 +144,16 @@ abstract class ApiClient
             return ['ok' => false, 'status' => 0, 'body' => null, 'error' => $this->service() . '_reentrant_call_refused'];
         }
 
-        $url = $this->apiRoot() . '/' . ltrim($path, '/');
+        $root = $this->apiRoot();
+        if ($root === '') {
+            // Fail closed: with no configured environment there is no right
+            // answer to "which Manage?", and a guess can be the wrong tenant.
+            $this->log('refused', $path, 0, 0.0, 'environment_not_configured');
+
+            return ['ok' => false, 'status' => 0, 'body' => null, 'error' => 'environment_not_configured'];
+        }
+
+        $url = $root . '/' . ltrim($path, '/');
         $memoKey = $method . ' ' . $url . ' ' . self::identityOf($headers);
         $memoise = $method === 'GET' && $this->memoises();
         if ($memoise && isset($this->memo[$memoKey])) {

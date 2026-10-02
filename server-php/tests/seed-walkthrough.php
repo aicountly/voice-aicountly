@@ -27,10 +27,10 @@ const CMP = 4001;
 
 Tests\truncateAll();
 
-$auth = Auth::forTesting('stub-user-uuid', 'user', 'voice', ['acs_type' => 1]);
+$auth = Auth::forTesting('101');
 Auth::adopt($auth);
 $ctx = Context::forCompany(CMP);
-Context::trustForTesting(CMP, $auth);
+Context::trustForTesting(CMP, $auth, true);
 
 Tests\seedSettings(CMP, [
     'timezone' => 'Asia/Kolkata',
