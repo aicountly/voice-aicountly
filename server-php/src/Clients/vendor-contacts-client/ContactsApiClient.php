@@ -1,4 +1,4 @@
-<?php // source: contacts-react-app@cfd747f clients/php/ContactsApiClient.php
+<?php // source: contacts-react-app@6dc85d5 clients/php/ContactsApiClient.php
 
 // source: contacts-react-app@<sha> clients/php/ContactsApiClient.php
 //
@@ -7,17 +7,14 @@
 // <consumer>/…/vendor-contacts-client/ContactsApiClient.php, replace <sha> above with the
 // contacts-react-app commit it was copied from, and run clients/drift-check.sh in CI.
 //
-// Status: 1.0.0-pre (first publication, 2026-10-02). Every method below codes to the v1
-// contract (IMPLEMENTATION_SPEC §3). Server side, as of this version:
-//   live now   list/get/lookup/create/find-or-create/from-chat-invite/archive/delete/merge,
-//              company list/get/lookup/create/find-or-create/by-reference/references/archive,
-//              exports, counts (I-09), PATCH partial update + If-Match/412 (CT1, I-04), strict
-//              parameter allow-lists → 400 unsupported_parameter / validation_failed and lookup
-//              meta.matchCount (I-23).
-//   pending    restore/resolve/changes and 409 contact_merged (CT1, I-08/I-22),
-//              Delegation tokens + X-AIC-Service headers (CT4, I-19). Until a route lands the
-//              server answers 404/405, which this client raises as ContactsApiException
-//              (never as "no contact", never as a reason to sign the user out).
+// Status: 1.0.0 (2026-10-02). Every method below codes to the v1 contract and is exercised
+// against the real server by server-php/tests/Integration/ContractConformanceTest.php:
+// list/get/lookup (meta.matchCount)/create/find-or-create/from-chat-invite, PATCH + If-Match
+// (412), archive/restore/delete, resolve/resolve-many/changes, 409 contact_merged, counts,
+// company list/get/lookup/create/find-or-create/by-reference/references/archive/counts,
+// strict allow-lists (400 unsupported_parameter / validation_failed), Delegation tokens and
+// X-AIC-Service headers. Not covered by this client: imports, exports, categories and the
+// provider screens (SPA-only surfaces; see docs/api/openapi.yaml).
 //
 // Rules this client enforces for every consumer (spec §4):
 //   * only allowed query parameters are sent — anything else throws before the request;
@@ -81,7 +78,7 @@ final class ContactsPreconditionFailedException extends ContactsApiException
 
 final class ContactsApiClient
 {
-    public const VERSION = '1.0.0-pre';
+    public const VERSION = '1.0.0';
 
     /** Query parameters each endpoint accepts (IMPLEMENTATION_SPEC §3.4). */
     public const ALLOWED = [
