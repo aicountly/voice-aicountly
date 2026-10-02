@@ -41,7 +41,7 @@ final class CallbackService
      */
     public static function create(Context $ctx, Auth $auth, array $input): array
     {
-        $e164 = CallingPolicy::normalise((string) ($input['e164'] ?? ''));
+        $e164 = CallingPolicy::normaliseFor($ctx, (string) ($input['e164'] ?? ''));
         if ($e164 === null) {
             return ['ok' => false, 'code' => 'invalid_number', 'message' => 'That is not a number this system can dial.', 'callback' => null];
         }

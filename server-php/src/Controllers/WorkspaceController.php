@@ -69,15 +69,18 @@ final class WorkspaceController extends Controller
         [, $ctx] = self::enter('voice.numbers.manage');
         $body = Http::body();
 
-        $e164 = CallingPolicy::normalise((string) ($body['e164'] ?? ''));
+        // A business number is read in the country it is declared for.
+        $country = \Aicountly\Api\Support\PhoneNumber::region((string) ($body['country'] ?? ''))
+            ?? CallingPolicy::regionFor($ctx);
+        $e164 = CallingPolicy::normalise((string) ($body['e164'] ?? ''), $country);
         if ($e164 === null) {
-            Http::validationFailed('That is not a number in E.164 form.', ['e164' => 'Use +<country><number>.']);
+            Http::validationFailed('That is not a valid number.', ['e164' => 'Use +<country><number>, or a ' . $country . ' number.']);
         }
 
         $values = [
             'e164'             => $e164,
             'label'            => trim((string) ($body['label'] ?? '')),
-            'country'          => strtoupper(trim((string) ($body['country'] ?? 'IN'))),
+            'country'          => $country,
             'number_type'      => (string) ($body['number_type'] ?? 'landline'),
             'connection_id'    => isset($body['connection_id']) ? (int) $body['connection_id'] : null,
             'team_id'          => isset($body['team_id']) ? (int) $body['team_id'] : null,
@@ -351,6 +354,9 @@ final class WorkspaceController extends Controller
         [$auth, $ctx] = self::enter('voice.dashboard.view');
 
         Http::data(Settings::forCompany($ctx->cmpId) + [
+            // What a national number is actually read as, wherever it was set.
+            'effective_phone_region'  => CallingPolicy::regionFor($ctx),
+            'supported_phone_regions' => \Aicountly\Api\Support\PhoneNumber::supportedRegions(),
             'can_edit' => Permissions::allows($ctx, $auth, 'voice.settings.manage'),
             'policy_note' => 'These are settings this business chooses. Voice enforces what it is told; it does not certify that any combination meets a legal obligation.',
         ]);
@@ -423,9 +429,14 @@ final class WorkspaceController extends Controller
         [$auth, $ctx] = self::enter('voice.campaigns.manage');
         $body = Http::body();
 
-        $e164 = CallingPolicy::normalise((string) ($body['e164'] ?? ''));
+        // Read in the company's region, so a DND entry typed nationally
+        // suppresses the same E.164 a campaign would dial.
+        $e164 = CallingPolicy::normaliseFor($ctx, (string) ($body['e164'] ?? ''));
         if ($e164 === null) {
-            Http::validationFailed('That is not a number in E.164 form.');
+            Http::validationFailed(
+                'That is not a valid number.',
+                ['e164' => 'Use +<country><number>, or a ' . CallingPolicy::regionFor($ctx) . ' number.'],
+            );
         }
 
         CallingPolicy::suppress(

@@ -287,7 +287,7 @@ final class CampaignService
             }
         }
 
-        $e164 = $raw === '' ? null : CallingPolicy::normalise($raw);
+        $e164 = $raw === '' ? null : CallingPolicy::normaliseFor($ctx, $raw);
 
         return $e164 === null
             ? ['ok' => false, 'e164' => null, 'reason' => 'no_number']

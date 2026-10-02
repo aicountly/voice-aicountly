@@ -422,6 +422,10 @@ export interface VoiceSettings {
   campaign_approval_required: boolean
   max_concurrent_calls: number
   wrap_up_seconds: number
+  /** Region national numbers are read in; null = the server default. */
+  default_phone_region: string | null
+  effective_phone_region?: string
+  supported_phone_regions?: string[]
   configured: boolean
   can_edit?: boolean
   policy_note?: string

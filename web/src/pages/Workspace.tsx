@@ -513,6 +513,21 @@ export function Settings() {
                       />
                       A campaign must be approved before it can launch
                     </label>
+                    <Field
+                      label="Region for numbers typed without a country code"
+                      hint={`9876543210 is read as a ${settings.effective_phone_region ?? 'IN'} number. Numbers starting + or 00 are never changed.`}
+                    >
+                      <select
+                        value={settings.default_phone_region ?? ''}
+                        disabled={!editable}
+                        onChange={(event) => setDraft({ ...draft, default_phone_region: event.target.value === '' ? null : event.target.value })}
+                      >
+                        <option value="">Server default</option>
+                        {(settings.supported_phone_regions ?? []).map((region) => (
+                          <option key={region} value={region}>{region}</option>
+                        ))}
+                      </select>
+                    </Field>
                     <Field label="Maximum concurrent calls" hint="0 uses the provider's ceiling only.">
                       <input
                         type="number"

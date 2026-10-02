@@ -1434,4 +1434,60 @@ T::group('26. Sibling hosts come from configuration, never from the request (G18
     T::same('local', \Aicountly\Api\Environment::current(), 'with AIC_ENVIRONMENT unset, APP_ENV decides');
 }
 
+// ===========================================================================
+T::group('27. Numbers become E.164 with a region, never by prefixing + (G18#6)');
+// ===========================================================================
+{
+    $e = static fn (string $raw, ?string $region = 'IN'): ?string => \Aicountly\Api\Support\PhoneNumber::toE164($raw, $region);
+
+    T::same('+919876543210', $e('9876543210'), 'an Indian national mobile is +91, not +98 (Iran)');
+    T::same('+919876543210', $e('09876543210'), 'the trunk 0 is dropped');
+    T::same('+919876543210', $e('+91 98765-43210'), 'an international form is kept');
+    T::same('+919876543210', $e('0091 98765 43210'), '00 is the international prefix');
+    T::same('+919876543210', $e('91 98765 43210'), 'the country code typed without + is recognised');
+    T::same('+918023456789', $e('080 2345 6789'), 'a landline with its STD code');
+    T::same(null, $e('9876543210', null), 'with no region a national number is refused, not guessed');
+    T::same(null, $e('98765'), 'too short is refused');
+    T::same(null, $e('98765 43210 ext 12'), 'an extension is refused rather than silently dropped');
+    T::same(null, $e('+91 12345'), 'a known country with the wrong national length is refused');
+    T::same('+14155550100', $e('(415) 555-0100', 'US'), 'a US national number in the US region');
+    T::same('+447911123456', $e('07911 123456', 'GB'), 'a UK mobile with its trunk 0');
+    T::ok(\Aicountly\Api\Support\PhoneNumber::same('98765 43210', '+919876543210', 'IN'), 'two forms of one number compare equal');
+
+    $ctx = scope(CMP, $owner);
+    seedSettings(CMP);
+    T::same('IN', CallingPolicy::regionFor($ctx), 'with nothing configured the region is IN');
+    putenv('VOICE_DEFAULT_PHONE_REGION=AE');
+    T::same('AE', CallingPolicy::regionFor($ctx), 'VOICE_DEFAULT_PHONE_REGION is next');
+    seedSettings(CMP, ['default_phone_region' => 'US']);
+    T::same('US', CallingPolicy::regionFor($ctx), 'and the company setting wins over it');
+    T::same('+14155550100', CallingPolicy::normaliseFor($ctx, '415 555 0100'), 'so a national number is read in the company region');
+    putenv('VOICE_DEFAULT_PHONE_REGION');
+    seedSettings(CMP, ['default_phone_region' => '']);
+    T::same(null, \Aicountly\Api\Settings::forCompany(CMP)['default_phone_region'], 'an empty value clears the setting');
+
+    // Suppression typed nationally protects the number a campaign dials.
+    Auth::adopt($owner);
+    Context::trustForTesting(CMP, $owner);
+    $suppressed = request('POST', '/v1/suppressions', ['cmp_id' => (string) CMP], ['e164' => '98765 00077', 'reason' => 'opt_out']);
+    T::same(200, $suppressed['status'], 'a suppression can be entered without a country code');
+    T::ok(CallingPolicy::isSuppressed($ctx, '+919876500077'), 'and it suppresses the E.164 number');
+    $check = CallingPolicy::check($ctx, '+919876500077');
+    T::same('suppressed', $check['reason'], 'so a dial to +91… is refused as suppressed');
+
+    // A callback typed nationally is stored as the real number.
+    $callback = request('POST', '/v1/callbacks', ['cmp_id' => (string) CMP], ['e164' => '9876543210', 'reason' => 'test']);
+    $stored = Db::scalar('SELECT e164 FROM voice_callbacks WHERE cmp_id = :cmp ORDER BY callback_id DESC LIMIT 1', ['cmp' => CMP]);
+    T::ok(in_array($callback['status'], [200, 201], true), 'a callback with a national number is accepted');
+    T::same('+919876543210', $stored, 'and stored as +919876543210, never +9876543210');
+
+    $badCallback = request('POST', '/v1/callbacks', ['cmp_id' => (string) CMP], ['e164' => '12345']);
+    T::same(422, $badCallback['status'], 'a number that cannot be read is refused with 422');
+
+    // A call placed to a national number dials the national number.
+    $call = CallService::place($ctx, $owner, ['to' => '98765 00088']);
+    T::ok($call['ok'], 'a call to a national number is placed');
+    T::same('+919876500088', $call['call']['remote_e164'] ?? null, 'to +91, the company region');
+}
+
 exit(T::summary());
