@@ -300,3 +300,17 @@ function stubReset(): void
         @unlink($file);
     }
 }
+
+
+/** Inbound call fixtures for the identification tests. */
+final class InboundTest
+{
+    public static function call(int $cmpId, string $from): int
+    {
+        return (int) Db::insert('voice_calls', [
+            'call_uuid' => Uuid::v4(), 'cmp_id' => $cmpId, 'direction' => 'inbound', 'origin' => 'INBOUND',
+            'remote_e164' => $from, 'local_e164' => '+918066000001', 'state' => 'ringing',
+            'correlation_id' => Uuid::v4(), 'contact_lookup_state' => 'not_attempted',
+        ], 'call_id');
+    }
+}

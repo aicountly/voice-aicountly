@@ -1735,4 +1735,80 @@ T::group('30. Campaign worker reads Contacts through a delegation grant (I-19, G
     putenv('CONTACTS_SERVICE_KEY');
 }
 
+// ===========================================================================
+T::group('31. Inbound calls are created and callers identified by company lookup (G18#4)');
+// ===========================================================================
+{
+    stubReset();
+    Context::resetForTesting();
+    $ctx = scope(CMP, $owner);
+    Auth::adopt($owner);
+    $connectionId = (int) Db::scalar('SELECT connection_id FROM voice_provider_connections WHERE cmp_id = :c ORDER BY connection_id LIMIT 1', ['c' => CMP]);
+
+    // The real webhook route, over HTTP, with a signed gateway event.
+    $port = (int) (getenv('STUB_PORT') ?: 8794) + 7;
+    $docroot = sys_get_temp_dir() . '/voice-webhook-' . getmypid();
+    @mkdir($docroot);
+    @symlink(dirname(__DIR__), $docroot . '/api');
+    $server = proc_open(['php', '-S', '127.0.0.1:' . $port, '-t', $docroot, $docroot . '/api/index.php'], [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+    for ($i = 0; $i < 40 && @fsockopen('127.0.0.1', $port) === false; $i++) {
+        usleep(100000);
+    }
+    $send = static function (array $event) use ($port, $connectionId): array {
+        $payload = (string) json_encode($event);
+        $ts = (string) time();
+        $ch = curl_init('http://127.0.0.1:' . $port . '/api/webhooks/telephony/' . $connectionId);
+        curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => $payload, CURLOPT_RETURNTRANSFER => true, CURLOPT_HTTPHEADER => [
+            'Content-Type: application/json',
+            'X-Voice-Timestamp: ' . $ts,
+            'X-Voice-Signature: ' . hash_hmac('sha256', $ts . '.' . $payload, 'stub-signing-secret'),
+        ]]);
+        $body = (string) curl_exec($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+
+        return ['status' => $status, 'body' => json_decode($body, true) ?: []];
+    };
+
+    $first = $send(['event_id' => 'in-1', 'event' => 'call.inbound', 'leg_ref' => 'leg-in-1', 'from' => '98765 00011', 'to' => '+918066000001']);
+    T::same(200, $first['status'], 'a signed call.inbound event is accepted');
+    $call = Db::first("SELECT * FROM voice_calls WHERE cmp_id = :c AND direction = 'inbound' ORDER BY call_id DESC LIMIT 1", ['c' => CMP]);
+    T::ok($call !== null, 'and creates an inbound call row');
+    T::same('+919876500011', $call['remote_e164'] ?? null, 'the caller id read in the company region');
+    T::same('ringing', $call['state'] ?? null, 'ringing');
+    T::same('not_attempted', $call['contact_lookup_state'] ?? null, 'and no lookup claimed yet — the webhook never asks Contacts');
+    T::same(null, $call['contact_ref'] ?? null, 'so nothing is linked by the carrier callback');
+    $replay = $send(['event_id' => 'in-1b', 'event' => 'call.inbound', 'leg_ref' => 'leg-in-1', 'from' => '98765 00011', 'to' => '+918066000001']);
+    T::same(1, (int) Db::scalar("SELECT COUNT(*) FROM voice_call_legs WHERE provider_leg_ref = 'leg-in-1'"), 'the same leg twice is one call');
+    proc_terminate($server);
+    @unlink($docroot . '/api');
+    @rmdir($docroot);
+
+    $callId = (int) $call['call_id'];
+    $id = request('POST', '/v1/calls/' . $callId . '/identify', ['cmp_id' => (string) CMP]);
+    T::same('matched', $id['body']['data']['state'] ?? null, 'the console identifies the caller: exactly one company contact holds the number');
+    T::same('Stub One', $id['body']['data']['contact']['display_name'] ?? null, 'and shows the name read live');
+    T::same('stub-1', Db::scalar('SELECT contact_ref FROM voice_calls WHERE call_id = :id', ['id' => $callId]), 'contact_ref is stored (the id, never the name)');
+
+    $shared = InboundTest::call(CMP, '+919876500099');
+    $amb = request('POST', '/v1/calls/' . $shared . '/identify', ['cmp_id' => (string) CMP]);
+    T::same('ambiguous', $amb['body']['data']['state'] ?? null, 'two contacts with the number: ambiguous');
+    T::same(2, count($amb['body']['data']['candidates'] ?? []), 'the candidates are offered to a person');
+    T::same(null, Db::scalar('SELECT contact_ref FROM voice_calls WHERE call_id = :id', ['id' => $shared]), 'and NOTHING is linked automatically');
+
+    $unknown = InboundTest::call(CMP, '+919876500055');
+    $none = request('POST', '/v1/calls/' . $unknown . '/identify', ['cmp_id' => (string) CMP]);
+    T::same('no_match', $none['body']['data']['state'] ?? null, 'an unknown number is no_match — only now may the console say "not linked"');
+    T::same(0, (int) Db::scalar("SELECT COUNT(*) FROM pg_tables WHERE schemaname = 'public' AND tablename LIKE '%contact%'"), 'and no contact is created anywhere in Voice');
+
+    stubMode('contacts', 'down');
+    $later = InboundTest::call(CMP, '+919876500056');
+    $down = request('POST', '/v1/calls/' . $later . '/identify', ['cmp_id' => (string) CMP]);
+    T::same('unavailable', $down['body']['data']['state'] ?? null, 'Contacts down is "unavailable", not "no match"');
+    stubReset();
+
+    $shown = request('GET', '/v1/calls/' . $later, ['cmp_id' => (string) CMP]);
+    T::same('unavailable', $shown['body']['data']['contact_lookup_state'] ?? null, 'and the call says so to every screen');
+}
+
 exit(T::summary());

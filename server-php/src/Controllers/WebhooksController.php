@@ -8,6 +8,7 @@ use Aicountly\Api\Audit;
 use Aicountly\Api\Context;
 use Aicountly\Api\Db;
 use Aicountly\Api\Domain\CallStateMachine;
+use Aicountly\Api\Domain\InboundCalls;
 use Aicountly\Api\Domain\RecordingService;
 use Aicountly\Api\Domain\UsageService;
 use Aicountly\Api\Http;
@@ -85,6 +86,13 @@ final class WebhooksController extends Controller
         $cmpId = (int) $connection['cmp_id'];
         $ctx = Context::forCompany($cmpId, (int) $connection['bo_id']);
         $callId = self::resolveCall($cmpId, $event, $decoded);
+
+        // A call the gateway received on one of our numbers: create Voice's
+        // record of it. Voice-owned state only — this route never asks Contacts
+        // who is calling; the answering agent's console does (InboundCalls).
+        if ($callId === null) {
+            $callId = InboundCalls::ingest($connection, $event, $decoded);
+        }
 
         $result = CallStateMachine::applyProviderEvent(
             $cmpId,

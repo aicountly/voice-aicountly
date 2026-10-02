@@ -366,6 +366,11 @@ final class CallService
             'remote_masked'  => $row['remote_e164'] === null ? null : CallingPolicy::mask((string) $row['remote_e164']),
             'local_e164'     => $row['local_e164'],
             'contact_ref'    => $row['contact_ref'],
+            // What a lookup in Contacts found, so the console never claims "not
+            // linked" before anybody looked (G18#4). Never the contact's name.
+            'contact_lookup_state' => $row['contact_lookup_state'] ?? null,
+            'contact_lookup_at'    => $row['contact_lookup_at'] ?? null,
+            'contact_lookup_matches' => isset($row['contact_lookup_matches']) ? (int) $row['contact_lookup_matches'] : null,
             'crm_lead_ref'   => $row['crm_lead_ref'],
             'campaign_id'    => $row['campaign_id'] === null ? null : (int) $row['campaign_id'],
             'queue_id'       => $row['queue_id'] === null ? null : (int) $row['queue_id'],

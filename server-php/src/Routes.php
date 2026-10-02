@@ -71,6 +71,7 @@ final class Routes
         $router->post('/v1/calls/{id}/actions', [CallsController::class, 'actions']);
         $router->get('/v1/calls/{id}/transcript', [CallsController::class, 'transcript']);
         $router->post('/v1/calls/{id}/disposition', [CallsController::class, 'disposition']);
+        $router->post('/v1/calls/{id}/identify', [CallsController::class, 'identify']);
         $router->get('/v1/calls/{id}/summary', [IntelligenceController::class, 'summary']);
         $router->post('/v1/calls/{id}/summary', [IntelligenceController::class, 'editSummary']);
         $router->post('/v1/calls/{id}/review', [IntelligenceController::class, 'review']);

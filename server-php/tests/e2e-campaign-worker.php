@@ -126,4 +126,12 @@ T::ok($resume['ok'], 'A resumes; a fresh grant is issued');
 echo '    worker: ' . trim($runWorker()) . "\n";
 T::same('dialling', Db::scalar('SELECT status FROM voice_campaign_attempts WHERE audience_ref_id = :r', ['r' => $ref]), 'and the worker carries on');
 
+// G18#4 against the real Contacts: identify an inbound caller in company X.
+$known = InboundTest::call(X, '+919845098765');
+$who = \Aicountly\Api\Domain\InboundCalls::identify($ctx, $auth, $known);
+T::same('matched', $who['state'], 'an inbound call from Kiran\'s number is identified (real company lookup, matchCount 1)');
+T::same($kiran, Db::scalar('SELECT contact_ref FROM voice_calls WHERE call_id = :id', ['id' => $known]), 'and linked to the company contact id');
+$stranger = InboundTest::call(X, '+919845011111');
+T::same('no_match', \Aicountly\Api\Domain\InboundCalls::identify($ctx, $auth, $stranger)['state'], 'an unknown caller is no_match, nothing linked');
+
 exit(T::summary());

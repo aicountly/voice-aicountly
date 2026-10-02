@@ -39,6 +39,9 @@ export interface Call {
   local_e164: string | null
   /** Aicountly Contacts' id. The name is read from Contacts, never stored here. */
   contact_ref: string | null
+  /** What a company lookup in Contacts found; null/not_attempted = nobody has looked yet. */
+  contact_lookup_state?: 'not_attempted' | 'matched' | 'no_match' | 'ambiguous' | 'unavailable' | 'forbidden' | null
+  contact_lookup_matches?: number | null
   crm_lead_ref: string | null
   campaign_id: number | null
   queue_id: number | null

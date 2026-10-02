@@ -311,6 +311,8 @@ final class GatewayAdapter implements ProviderAdapter
         return match ($type) {
             'call.initiated'    => 'initiated',
             'call.queued'       => 'queued',
+            // A call the gateway received for one of our numbers (inbound).
+            'call.inbound'      => 'ringing',
             'call.ringing'      => 'ringing',
             'call.answered'     => 'answered',
             'call.held'         => 'held',
