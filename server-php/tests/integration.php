@@ -2903,4 +2903,44 @@ T::group('34. Campaigns say what an agent or a reminder cannot do');
     Features::overrideForTesting(null);
 }
 
+// ===========================================================================
+T::group('35. Voice asks Pay only for routes Pay serves (pay-routes-voice-messaging)');
+// ===========================================================================
+{
+    // Pay's route table as a service key meets it (tests/fixtures/pay_service_routes.json says from where).
+    // The old client called `payment-links`, which Pay has never served: every call was a 404 that the
+    // recovery worker read as "Pay is still not answering".
+    $fixture = json_decode((string) file_get_contents(__DIR__ . '/fixtures/pay_service_routes.json'), true);
+    $served = array_map(static fn (array $route): string => $route[0] . ' ' . $route[1], $fixture['routes']);
+
+    $source = (string) file_get_contents(__DIR__ . '/../src/Clients/PayClient.php');
+    preg_match_all('/->request\(\s*\'([A-Z]+)\'\s*,\s*([^,]+?)\s*,/', $source, $calls, PREG_SET_ORDER);
+    $called = [];
+    foreach ($calls as [, $method, $expression]) {
+        $expression = (string) preg_replace('/\.\s*self::query\(.*$/s', '', $expression);
+        preg_match_all('/\'([^\']*)\'|(rawurlencode\([^)]*\))/', $expression, $parts, PREG_SET_ORDER);
+        $path = '';
+        foreach ($parts as $part) {
+            $path .= ($part[2] ?? '') !== '' ? '{id}' : $part[1];
+        }
+        $called[] = $method . ' ' . $path;
+    }
+
+    T::ok($called !== [], 'the scan finds the requests the Pay client makes');
+    T::same([], array_values(array_diff($called, $served)), 'every request the Pay client makes is a route Pay serves');
+
+    // And nothing reaches Pay by other means: an operation aimed at Pay (nothing opens one today) is not
+    // settled by asking a Pay route, and is not guessed at either.
+    $ctx = scope(CMP, $owner);
+    $opened = ExternalOperations::begin($ctx, 'pay', 'create_payment_link', ['purpose' => 'test'], [], USER);
+    $output = runRecovery();
+    T::ok(!str_contains($output, 'service=pay'), 'the recovery worker makes no call to Pay for it');
+    T::ok(str_contains($output, '[call-recovery] pay operation ' . $opened['operation_id'] . ': pay has no read Voice can reconcile against'),
+        'and says in the log why the outcome stays unknown');
+    $after = ExternalOperations::find($ctx, (int) $opened['operation_id']);
+    T::ok(!in_array((string) $after['status'], [ExternalOperations::SUCCEEDED, ExternalOperations::FAILED, ExternalOperations::RECONCILED], true),
+        'the operation is neither settled nor declared failed on that basis');
+    T::same(2, (int) $after['attempts'], 'it is deferred, so a person is asked once the attempts run out');
+}
+
 exit(T::summary());

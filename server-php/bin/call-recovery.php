@@ -34,7 +34,6 @@ declare(strict_types=1);
 namespace Aicountly\Api;
 
 use Aicountly\Api\Clients\CrmClient;
-use Aicountly\Api\Clients\PayClient;
 use Aicountly\Api\Domain\AppointmentsBooking;
 use Aicountly\Api\Domain\CallbackDiary;
 use Aicountly\Api\Domain\CallStateMachine;
@@ -80,13 +79,17 @@ foreach (ExternalOperations::dueForReconcile(50) as $operation) {
 
     $result = match ($targetApp) {
         'crm'      => (new CrmClient())->findTaskByCorrelation($correlationId),
-        'pay'      => (new PayClient())->findByCorrelation($correlationId),
         default    => null,
     };
 
     if ($result === null) {
         // No reconciliation read exists for this product yet. Saying so is
-        // better than guessing at an outcome.
+        // better than guessing at an outcome. Pay is the case that matters:
+        // it has no lookup by Voice's correlation id, and a payment is the one
+        // outcome that must never be inferred, so the operation is only ever
+        // deferred and then handed to a person.
+        error_log('[call-recovery] ' . $targetApp . ' operation ' . (int) $operation['operation_id']
+            . ': ' . $targetApp . ' has no read Voice can reconcile against; outcome left unknown');
         ExternalOperations::deferReconcile(
             (int) $operation['operation_id'],
             (int) $operation['attempts'] + 1,

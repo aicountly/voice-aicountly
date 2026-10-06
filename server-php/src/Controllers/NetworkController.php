@@ -181,7 +181,7 @@ final class NetworkController extends Controller
             'calendar'  => ['label' => 'Aicountly Calendar', 'client' => CalendarClient::class, 'purpose' => 'Callback diary entries: a busy block in the assigned agent’s diary, moved and cancelled with the callback.'],
             'appointments' => ['label' => 'Aicountly Appointments', 'client' => AppointmentsClient::class, 'purpose' => 'Bookings an AI agent makes during a call: free times and new bookings, through Appointments’ booking API. Moving or cancelling a booking is handed to a person.'],
             'crm'       => ['label' => 'Aicountly CRM',      'client' => CrmClient::class,      'purpose' => 'Leads and follow-up tasks from confirmed commitments.'],
-            'pay'       => ['label' => 'Aicountly Pay',      'client' => PayClient::class,      'purpose' => 'Payment links sent during a call.'],
+            'pay'       => ['label' => 'Aicountly Pay',      'client' => PayClient::class,      'purpose' => 'Reachability only: Voice does not raise or read payment requests, so no payment link is sent during a call.'],
             'lobby'     => ['label' => 'Aicountly Lobby',    'client' => LobbyClient::class,    'purpose' => 'Reception desk coverage and visitor callbacks.'],
             'messaging' => ['label' => 'Aicountly Messaging', 'client' => MessagingClient::class, 'purpose' => 'Follow-up messages after a call.'],
         ];
