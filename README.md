@@ -111,7 +111,8 @@ no adapter because it looks finished.
 Voice owns its prompts, its calling-domain workflows and its action allowlist
 (`src/Ai/AiClient.php`). Every model call goes to the AI Pulse gateway
 (`src/Ai/PulseAiClient.php`, contract: pulse-aicountly `docs/AI_GATEWAY.md`)
-with the signed-in user's own session: Pulse picks the model from Console,
+with Voice's own gateway key (`PULSE_SERVICE_KEY`, sent on every call) and the
+signed-in user's own session: Pulse picks the model from Console,
 enforces the daily AI allowance and reports usage per feature (`call.summary`).
 Voice holds no model key, calls no model provider and has no fallback model —
 when Pulse cannot answer, the rule-based path does, and the screen says so.
@@ -297,9 +298,11 @@ without it. The ones with no safe default:
 - `VOICE_AI_ENABLED` — off means no AI: the deterministic paths answer
   instead and the screen says the result is rule-based. On, AI runs through
   AI Pulse with the user's own session; there is no model key to set.
-  `PULSE_API_ORIGIN` follows `AIC_ENVIRONMENT` unless set, and
-  `PULSE_SERVICE_KEY` is needed only for AI a service caller (no user session)
-  starts.
+  `PULSE_API_ORIGIN` follows `AIC_ENVIRONMENT` unless set. `PULSE_SERVICE_KEY`
+  is Voice's own AI Pulse gateway key (minted on Pulse with
+  `php spark pulse:gateway-key mint voice`), sent on every AI call as
+  `X-Pulse-Service-Key`; Pulse accepts a user's session without it only until
+  2026-11-15, and `CONSOLE_SERVICE_KEY` is no fallback.
 
 ## Deployment
 

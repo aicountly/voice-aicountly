@@ -8,9 +8,11 @@ model key" as covering the Voice Gateway.
 - Every model call Voice's PHP makes goes to AI Pulse (`server-php/src/Ai/PulseAiClient.php`):
   call summaries today. No provider host, SDK or model key exists in `server-php/` or `web/`, and
   `tests/integration.php` group 25 fails if one appears.
-- With no user session (another product's backend calling Voice), Pulse is called with
-  `PULSE_SERVICE_KEY`, which still falls back to the estate-wide `CONSOLE_SERVICE_KEY`. Separating
-  the two is Console/Pulse custody work (I-29), not done here.
+- Every Pulse call carries Voice's own gateway key, `PULSE_SERVICE_KEY` (minted on Pulse with
+  `php spark pulse:gateway-key mint voice`), as `X-Pulse-Service-Key`, beside the signed-in user's
+  session when there is one. With no user session (another product's backend calling Voice) the
+  key goes alone. The estate-wide `CONSOLE_SERVICE_KEY` is no longer a fallback; Pulse accepts a
+  session without the product key only until 2026-11-15.
 
 ## What is not in this repository
 
@@ -39,5 +41,7 @@ Consequences, stated plainly:
 
 1. Gateway owners: an inventory of the vendor keys it holds, and a plan to move speech and
    transcription behind Pulse endpoints, or an approved, written exception.
-2. Pulse/Console: separate `PULSE_SERVICE_KEY` from `CONSOLE_SERVICE_KEY` for Voice.
+2. Pulse: mint Voice's own gateway key (`voice`) on production and sandbox Pulse and set it as
+   `PULSE_SERVICE_KEY` in each `api/.env` before 2026-11-15. (The code no longer reads
+   `CONSOLE_SERVICE_KEY` for Pulse.)
 3. Runtime check (needs Gateway access): the deployed Gateway's configuration matches this page.

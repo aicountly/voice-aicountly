@@ -21,20 +21,33 @@ use Aicountly\Api\Environment;
  * secrets, embeddings and attachments are in the reference client for the day a
  * Voice feature needs them.
  *
- * Who is calling:
- *   - a signed-in user started the action: pass their ses_key (the Bearer this API
- *     received) and cmp_id / bo_id. Pulse checks the session and the company itself.
+ * Who is calling — on EVERY call, Voice's own gateway key (PULSE_SERVICE_KEY) as
+ * X-Pulse-Service-Key says which product it is (beside X-Pulse-Product: voice, the
+ * product the key is minted for), and:
+ *   - a signed-in user started the action: their ses_key (the Bearer this API
+ *     received) goes too, with cmp_id / bo_id. Pulse checks the session and the
+ *     company itself.
  *   - nobody with a session (another product's backend calling Voice with
- *     X-Service-Key): leave the ses_key null and PULSE_SERVICE_KEY is sent instead,
- *     falling back to CONSOLE_SERVICE_KEY (the same estate service key).
+ *     X-Service-Key): leave the ses_key null and the key goes alone. With no session
+ *     and no usable key nothing is sent (not_configured).
  *
- * Configuration (server-php/.env), both optional:
+ * Configuration (server-php/.env; PULSE_SERVICE_KEY is needed from 2026-11-15):
  *   PULSE_API_ORIGIN   https://pulse.aicountly.com (sandbox: https://pulse.gh.aicountly.com).
  *                      If unset, picked from the CONFIGURED environment (AIC_ENVIRONMENT,
  *                      else APP_ENV — see Environment): production → production Pulse,
  *                      sandbox and local → the sandbox. Never from the request's Host. With
  *                      no configured environment no call is made. A trailing /api is ignored.
- *   PULSE_SERVICE_KEY  only for calls with no user session.
+ *   PULSE_SERVICE_KEY  Voice's OWN AI Pulse gateway key, minted on Pulse with
+ *                      `php spark pulse:gateway-key mint voice` (production and sandbox Pulse
+ *                      each mint their own). Sent on every call — generate, text and the
+ *                      status probe — as X-Pulse-Service-Key. Until it is set a user call goes
+ *                      with the session alone, exactly as before the key existed; Pulse accepts
+ *                      that only until 2026-11-15 (UTC), then answers 401 product_key_required.
+ *                      The estate-wide CONSOLE_SERVICE_KEY is no fallback (Pulse retires it:
+ *                      401 service_key_retired) and is never read here. A value holding CR, LF,
+ *                      NUL or any other control character is refused whole: nothing is sent and
+ *                      the call is not_configured. The key, or any part of it, is never put in
+ *                      a result, a message or a log.
  *
  * Never throws, never logs content. Every method returns
  *   ['ok' => bool, 'status' => int, 'code' => ?string, 'message' => ?string, 'retryable' => bool, 'data' => ?array]
@@ -46,6 +59,9 @@ final class PulseAiClient
     public const PRODUCT    = 'voice';
     public const PRODUCTION = 'https://pulse.aicountly.com';
     public const SANDBOX    = 'https://pulse.gh.aicountly.com';
+
+    /** The setting that holds Voice's own gateway key. */
+    private const SERVICE_KEY_ENV = 'PULSE_SERVICE_KEY';
 
     /** @var \Closure(string, string, list<string>, ?string, float, float): array{status: int, body: ?string, error: ?string} */
     private \Closure $transport;
@@ -70,8 +86,8 @@ final class PulseAiClient
 
     /**
      * One call to POST /api/ai/v1/generate. Pass the user's ses_key whenever a user is
-     * behind the request; leave it null only when there is none (then the service key
-     * is sent).
+     * behind the request; leave it null only when there is none (then Voice's gateway
+     * key goes alone). The gateway key goes on every call, session or not.
      *
      * @param array<string, mixed> $request gateway body: feature, system, input|messages,
      *                                      response_format, tier, max_output_tokens, cmp_id, bo_id, actor_uuid
@@ -79,11 +95,14 @@ final class PulseAiClient
      */
     public function generate(array $request, ?string $userSesKey = null, ?string $idempotencyKey = null): array
     {
-        $caller = $this->callerHeader($userSesKey);
-        if ($caller === null) {
-            return self::result(false, 0, 'not_configured', 'No user session and no PULSE_SERVICE_KEY for an AI call with no user.', false);
+        $refused = $this->refusal($userSesKey, 'No user session and no PULSE_SERVICE_KEY for an AI call with no user.');
+        if ($refused !== null) {
+            return $refused;
         }
-        $headers = ['Content-Type: application/json', 'Accept: application/json', 'X-Pulse-Product: ' . self::PRODUCT, $caller];
+        $headers = array_merge(
+            ['Content-Type: application/json', 'Accept: application/json', 'X-Pulse-Product: ' . self::PRODUCT],
+            $this->callerHeaders($userSesKey),
+        );
         if ($idempotencyKey !== null && $idempotencyKey !== '') {
             $headers[] = 'Idempotency-Key: ' . $idempotencyKey;
         }
@@ -143,11 +162,11 @@ final class PulseAiClient
      */
     public function status(?string $userSesKey = null): array
     {
-        $caller = $this->callerHeader($userSesKey);
-        if ($caller === null) {
-            return self::result(false, 0, 'not_configured', 'No user session and no PULSE_SERVICE_KEY to ask AI Pulse with.', false);
+        $refused = $this->refusal($userSesKey, 'No user session and no PULSE_SERVICE_KEY to ask AI Pulse with.');
+        if ($refused !== null) {
+            return $refused;
         }
-        $headers = ['Accept: application/json', 'X-Pulse-Product: ' . self::PRODUCT, $caller];
+        $headers = array_merge(['Accept: application/json', 'X-Pulse-Product: ' . self::PRODUCT], $this->callerHeaders($userSesKey));
         if ($this->origin() === '') {
             return self::result(false, 0, 'not_configured', Environment::explainUnconfigured(), false);
         }
@@ -195,15 +214,74 @@ final class PulseAiClient
         return preg_replace('#/api$#i', '', $origin) ?? $origin;
     }
 
-    /** The user's session when a user is behind the call, else the estate service key; null when neither. */
-    private function callerHeader(?string $userSesKey): ?string
+    /**
+     * Why this call cannot be made, as a failed result, or null when it can: nothing is
+     * sent with a gateway key that cannot go in a header, nor with neither a session nor
+     * a key to say who is calling. The words name the setting, never its value.
+     *
+     * @return array{ok: bool, status: int, code: ?string, message: ?string, retryable: bool, data: ?array}|null
+     */
+    private function refusal(?string $userSesKey, string $nothingToSendWith): ?array
     {
-        if ($userSesKey !== null && $userSesKey !== '') {
-            return 'Authorization: Bearer ' . $userSesKey;
+        $key = self::serviceKey();
+        if ($key === null) {
+            return self::result(
+                false,
+                0,
+                'not_configured',
+                self::SERVICE_KEY_ENV . ' is not usable (it contains a line break or another control character), so nothing was sent to AI Pulse.',
+                false,
+            );
         }
-        $key = trim(Env::get('PULSE_SERVICE_KEY')) ?: trim(Env::get('CONSOLE_SERVICE_KEY'));
+        if ($key === '' && ($userSesKey === null || $userSesKey === '')) {
+            return self::result(false, 0, 'not_configured', $nothingToSendWith, false);
+        }
 
-        return $key !== '' ? 'X-Pulse-Service-Key: ' . $key : null;
+        return null;
+    }
+
+    /**
+     * Who is calling: Voice (its own gateway key, once PULSE_SERVICE_KEY is set) and the
+     * signed-in user (their session) when there is one — both, on every call. With the
+     * key unset these are exactly the headers Voice sent before the key existed. Call
+     * refusal() first: it rejects a key that cannot be sent and a call with nothing to
+     * identify it by.
+     *
+     * @return list<string>
+     */
+    private function callerHeaders(?string $userSesKey): array
+    {
+        $headers = [];
+        $key = self::serviceKey();
+        if ($key !== null && $key !== '') {
+            $headers[] = 'X-Pulse-Service-Key: ' . $key;
+        }
+        if ($userSesKey !== null && $userSesKey !== '') {
+            $headers[] = 'Authorization: Bearer ' . $userSesKey;
+        }
+
+        return $headers;
+    }
+
+    /**
+     * Voice's gateway key: '' while PULSE_SERVICE_KEY is unset or blank (spaces and tabs
+     * only), the key when it is usable, null when it holds a control character — CR, LF,
+     * NUL or any other in \x00-\x1F, or \x7F — that could end a header line early. Such a
+     * value is refused whole, never trimmed down to something that happens to be safe.
+     * Read on every call, so a rotated key is picked up without a restart. Only
+     * PULSE_SERVICE_KEY is read: CONSOLE_SERVICE_KEY is no fallback.
+     */
+    private static function serviceKey(): ?string
+    {
+        $value = Env::get(self::SERVICE_KEY_ENV);
+        if (trim($value, " \t") === '') {
+            return '';
+        }
+        if (preg_match('/[\x00-\x1F\x7F]/', $value) === 1) {
+            return null;
+        }
+
+        return trim($value, ' ');
     }
 
     /**

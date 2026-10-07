@@ -37,7 +37,8 @@ final class Features
      */
     private const REQUIREMENTS = [
         // Voice's AI runs through AI Pulse with the signed-in user's own
-        // session, so there is no key or model to configure here: the switch
+        // session (and Voice's own PULSE_SERVICE_KEY, sent on every call once
+        // set), so there is no model key or model to configure here: the switch
         // alone decides, and Pulse reports whether it has a model for Voice.
         'AI'              => [],
         // The media/telephony service. Browser calling and streaming speech are

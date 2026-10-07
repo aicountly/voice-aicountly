@@ -15,12 +15,13 @@ use Aicountly\Api\Features;
  * made wherever they are needed:
  *
  *  1. VOICE HOLDS NO MODEL KEY. Every task goes to AI Pulse (see PulseAiClient)
- *     with the signed-in user's own session; Pulse picks the model from
- *     Console, enforces budgets and reports usage per feature. Voice calls no
- *     model provider and has no fallback model of its own. The same goes for
- *     telecom, speech-recognition and text-to-speech credentials: none of them
- *     reaches the browser, because a key in a React bundle is a key published
- *     to everyone who opens the page.
+ *     with Voice's own gateway key and the signed-in user's own session; Pulse
+ *     picks the model from Console, enforces budgets and reports usage per
+ *     feature. Voice's gateway key is not a model key: it only tells Pulse which
+ *     product is calling. Voice calls no model provider and has no fallback
+ *     model of its own. The same goes for telecom, speech-recognition and
+ *     text-to-speech credentials: none of them reaches the browser, because a
+ *     key in a React bundle is a key published to everyone who opens the page.
  *
  *  2. THE MODEL NEVER WRITES A QUERY AND NEVER SUPPLIES A FIGURE. It is given
  *     rows already fetched by parameterised queries under the signed-in user's
@@ -114,10 +115,11 @@ final class AiClient
      * What a screen may say about AI here — read-only. There is no model,
      * provider or key to choose in Voice: AI runs through AI Pulse, and this
      * reports whether Pulse can serve Voice right now (GET /api/ai/v1/status),
-     * asked with the caller's own session.
+     * asked with the caller's own session (and Voice's gateway key, once set).
      *
      * `available` is null only when there was nobody to ask as — the
-     * unauthenticated health check on a host with no service key.
+     * unauthenticated health check on a host with no PULSE_SERVICE_KEY — or
+     * PULSE_SERVICE_KEY holds a value that cannot be sent.
      *
      * @return array{available: ?bool, service: string, tiers: ?array<string, bool>, reason: ?string, admin_hint: ?string}
      */
@@ -391,8 +393,9 @@ final class AiClient
      *
      * A person with a session: their ses_key, so Pulse checks them and the
      * company itself and the usage is theirs. Another product's backend calling
-     * with X-Service-Key carries no session, so the call goes with the service
-     * key and the acting person's uuid as our claim, for attribution.
+     * with X-Service-Key carries no session, so the call goes with Voice's own
+     * gateway key alone and the acting person's uuid as our claim, for
+     * attribution. Either way PulseAiClient adds the gateway key to every call.
      *
      * @return array{0: ?string, 1: array<string, int|string>}
      */
@@ -419,7 +422,7 @@ final class AiClient
     {
         return match ($code) {
             'ai_disabled'           => 'AI is not enabled for this deployment.',
-            'not_configured'        => 'AI is not available for a request made without a user session.',
+            'not_configured'        => 'AI Pulse is not configured on this server for this request.',
             'ai_unavailable', 'gateway_disabled' => 'No AI model is available to Voice right now.',
             'budget_exhausted'      => 'The daily AI allowance is used up.',
             'rate_limited'          => 'Too many AI requests just now. Try again shortly.',

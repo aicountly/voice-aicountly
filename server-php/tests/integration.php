@@ -1188,7 +1188,7 @@ T::group('25. AI runs through AI Pulse');
             [$name, $value] = array_pad(explode(':', $line, 2), 2, '');
             $named[strtolower(trim($name))] = trim($value);
         }
-        $sent[] = ['method' => $method, 'url' => $url, 'headers' => $named, 'body' => $body === null ? null : json_decode($body, true)];
+        $sent[] = ['method' => $method, 'url' => $url, 'headers' => $named, 'raw' => $headers, 'body' => $body === null ? null : json_decode($body, true)];
 
         return array_shift($replies) ?? ['status' => 0, 'body' => null, 'error' => 'unreachable'];
     };
@@ -1248,7 +1248,11 @@ T::group('25. AI runs through AI Pulse');
     T::same('POST https://pulse.test/api/ai/v1/generate', $call['method'] . ' ' . $call['url'], 'to POST /api/ai/v1/generate');
     T::same('voice', $call['headers']['x-pulse-product'] ?? null, 'as product "voice"');
     T::same('Bearer test-ses-key-' . USER, $call['headers']['authorization'] ?? null, 'with the signed-in user’s own session');
-    T::ok(!isset($call['headers']['x-pulse-service-key']), 'and no service key when a user is behind the call');
+    T::same(
+        ['Content-Type: application/json', 'Accept: application/json', 'X-Pulse-Product: voice', 'Authorization: Bearer test-ses-key-' . USER],
+        $call['raw'] ?? null,
+        'with PULSE_SERVICE_KEY unset the headers are exactly what they were before the key existed',
+    );
     T::same(
         ['call.summary', 'economy', 300],
         [$call['body']['feature'] ?? null, $call['body']['tier'] ?? null, $call['body']['max_output_tokens'] ?? null],
@@ -1293,31 +1297,151 @@ T::group('25. AI runs through AI Pulse');
             $code . ' is a failure with Voice’s message "' . $message . '"');
     }
 
-    // --- Nobody with a session: the service key, and only then --------------
+    // --- Voice's own gateway key goes on EVERY call (Pulse: 2026-11-15) -------
+    // PULSE_SERVICE_KEY is the key minted on Pulse for "voice". Pulse accepts a
+    // user's session without it only until 2026-11-15, so it goes beside the
+    // session on a user's call, and alone on a call with no user.
+    putenv('PULSE_SERVICE_KEY=test-voice-gateway-key');
+    $sent = [];
+    $replies = [$answer('The caller asked to move a Friday appointment.')];
+    $withKey = request('GET', '/v1/calls/' . $callId . '/summary', ['cmp_id' => (string) CMP, 'regenerate' => '1']);
+    T::same('model', $withKey['body']['data']['engine'] ?? null, 'with PULSE_SERVICE_KEY set a user’s summary still comes from Pulse');
+    T::same(
+        ['Content-Type: application/json', 'Accept: application/json', 'X-Pulse-Product: voice',
+            'X-Pulse-Service-Key: test-voice-gateway-key', 'Authorization: Bearer test-ses-key-' . USER],
+        $sent[0]['raw'] ?? null,
+        'a user’s call carries Voice’s own gateway key beside X-Pulse-Product and the user’s session',
+    );
+
+    $sent = [];
+    $replies = [$answer('Two callers waited more than five minutes.')];
+    AiClient::narrate($owner, $ctx, 'Explain the queue.', ['longest_wait_seconds' => 320]);
+    T::same(['test-voice-gateway-key', 'Bearer test-ses-key-' . USER, 'voice'],
+        [$sent[0]['headers']['x-pulse-service-key'] ?? null, $sent[0]['headers']['authorization'] ?? null, $sent[0]['headers']['x-pulse-product'] ?? null],
+        'and so does every other user task (insight.narrate)');
+
+    $sent = [];
+    $replies = [$pulseStatus(true)];
+    request('GET', '/v1/dashboards/studio', ['cmp_id' => (string) CMP]);
+    T::same(
+        ['Accept: application/json', 'X-Pulse-Product: voice', 'X-Pulse-Service-Key: test-voice-gateway-key', 'Authorization: Bearer test-ses-key-' . USER],
+        $sent[0]['raw'] ?? null,
+        'and the status probe a user’s screen makes (GET /api/ai/v1/status)',
+    );
+
+    // --- Nobody with a session: the gateway key alone, and only then ---------
     $service = Auth::forTesting('lobby-desk-7', 'service', 'lobby');
-    putenv('PULSE_SERVICE_KEY=test-pulse-service-key');
     $sent = [];
     $replies = [$answer('A caller asked for Monday.')];
     AiClient::summariseCall($service, $ctx, $segments);
-    T::same('test-pulse-service-key', $sent[0]['headers']['x-pulse-service-key'] ?? null,
-        'a service caller with no session is sent with PULSE_SERVICE_KEY');
-    T::ok(!isset($sent[0]['headers']['authorization']), 'and never with a borrowed session');
+    T::same(
+        ['Content-Type: application/json', 'Accept: application/json', 'X-Pulse-Product: voice', 'X-Pulse-Service-Key: test-voice-gateway-key'],
+        $sent[0]['raw'] ?? null,
+        'a service caller with no session is sent with PULSE_SERVICE_KEY alone, never a borrowed session',
+    );
     T::same('lobby-desk-7', $sent[0]['body']['actor_uuid'] ?? null, 'naming the acting person as an attribution claim');
 
-    putenv('PULSE_SERVICE_KEY');
-    putenv('CONSOLE_SERVICE_KEY=test-console-estate-key');
+    putenv('PULSE_SERVICE_KEY=  test-voice-gateway-key  ');
     $sent = [];
     $replies = [$answer('A caller asked for Monday.')];
     AiClient::summariseCall($service, $ctx, $segments);
-    T::same('test-console-estate-key', $sent[0]['headers']['x-pulse-service-key'] ?? null,
-        'PULSE_SERVICE_KEY falls back to CONSOLE_SERVICE_KEY');
+    T::same('X-Pulse-Service-Key: test-voice-gateway-key', $sent[0]['raw'][3] ?? null, 'spaces around the key are not sent');
 
-    putenv('CONSOLE_SERVICE_KEY');
+    // --- Unset or blank: exactly the headers of before -------------------------
+    foreach (['unset' => null, 'empty' => '', 'blank' => "   \t "] as $label => $value) {
+        putenv($value === null ? 'PULSE_SERVICE_KEY' : 'PULSE_SERVICE_KEY=' . $value);
+        $sent = [];
+        $replies = [$answer('A caller asked for Monday.')];
+        $plain = AiClient::summariseCall($owner, $ctx, $segments);
+        T::same(
+            [true, ['Content-Type: application/json', 'Accept: application/json', 'X-Pulse-Product: voice', 'Authorization: Bearer test-ses-key-' . USER]],
+            [$plain['ok'], $sent[0]['raw'] ?? null],
+            'PULSE_SERVICE_KEY ' . $label . ': a user’s call goes with exactly the headers of before',
+        );
+        $sent = [];
+        $replies = [$answer('never sent')];
+        $none = AiClient::summariseCall($service, $ctx, $segments);
+        T::same([false, 'not_configured', 0], [$none['ok'], $none['code'], count($sent)],
+            'PULSE_SERVICE_KEY ' . $label . ': with no session nothing is sent');
+    }
+
+    // --- CONSOLE_SERVICE_KEY is no fallback (Pulse retires it) ----------------
+    putenv('PULSE_SERVICE_KEY');
+    putenv('CONSOLE_SERVICE_KEY=test-console-estate-key');
     $sent = [];
     $replies = [$answer('never sent')];
     $none = AiClient::summariseCall($service, $ctx, $segments);
     T::same([false, 'not_configured', 0], [$none['ok'], $none['code'], count($sent)],
-        'with no session and no service key nothing is sent');
+        'with no session and only CONSOLE_SERVICE_KEY nothing is sent: the estate key is not Voice’s gateway key');
+    $sent = [];
+    $replies = [$answer('A caller asked for Monday.')];
+    AiClient::summariseCall($owner, $ctx, $segments);
+    T::same(
+        ['Content-Type: application/json', 'Accept: application/json', 'X-Pulse-Product: voice', 'Authorization: Bearer test-ses-key-' . USER],
+        $sent[0]['raw'] ?? null,
+        'and a user’s call never carries CONSOLE_SERVICE_KEY',
+    );
+    $tokens = token_get_all((string) file_get_contents(dirname(__DIR__) . '/src/Ai/PulseAiClient.php'));
+    $code = implode('', array_map(
+        static fn ($t): string => is_array($t) ? (in_array($t[0], [T_COMMENT, T_DOC_COMMENT], true) ? '' : $t[1]) : $t,
+        $tokens,
+    ));
+    T::ok(!str_contains($code, 'CONSOLE_SERVICE_KEY') && str_contains($code, "'PULSE_SERVICE_KEY'"),
+        'PulseAiClient reads PULSE_SERVICE_KEY and no other key');
+    putenv('CONSOLE_SERVICE_KEY');
+
+    // --- A key that cannot go in a header is refused whole --------------------
+    // Nothing is sent, the answer is not_configured, and no part of the key
+    // reaches the result, the message or the log.
+    $logFile = (string) tempnam(sys_get_temp_dir(), 'voice-ai-log-');
+    $previousLog = ini_set('error_log', $logFile);
+    $envFile = (string) tempnam(sys_get_temp_dir(), 'voice-env-');
+    $badKeys = [
+        'CR LF'  => "VKEYcr\r\nX-Injected: yes",
+        'LF'     => "VKEYlf\nX-Injected: yes",
+        'CR'     => "VKEYcr\rtail",
+        'NUL'    => "VKEYnul\0tail",
+        'TAB'    => "VKEYtab\ttail",
+        'US'     => "VKEYus\x1Ftail",
+        'DEL'    => "VKEYdel\x7Ftail",
+        'end LF' => "VKEYend\n",
+    ];
+    foreach ($badKeys as $label => $badKey) {
+        if (str_contains($badKey, "\0")) {
+            // An environment variable cannot hold NUL; api/.env can.
+            putenv('PULSE_SERVICE_KEY');
+            file_put_contents($envFile, (string) file_get_contents(dirname(__DIR__) . '/.env') . "\nPULSE_SERVICE_KEY=" . $badKey . "\n");
+            Env::load($envFile);
+        } else {
+            putenv('PULSE_SERVICE_KEY=' . $badKey);
+        }
+        AiClient::resetForTesting();
+        $sent = [];
+        $replies = [$answer('never sent'), $pulseStatus(true)];
+        $results = [
+            AiClient::summariseCall($owner, $ctx, $segments),
+            AiClient::summariseCall($service, $ctx, $segments),
+            (new PulseAiClient('https://pulse.test', 30.0, $transport))->status('a-session'),
+            (new PulseAiClient('https://pulse.test', 30.0, $transport))->text('call.summary', 'system', 'input', [], 'a-session'),
+            AiClient::describeAvailability($owner),
+        ];
+        T::same(
+            [0, 'not_configured', 'not_configured', 'not_configured', 'not_configured', null],
+            [count($sent), $results[0]['code'], $results[1]['code'], $results[2]['code'], $results[3]['code'], $results[4]['available']],
+            'PULSE_SERVICE_KEY with ' . $label . ': refused whole as not_configured, and nothing is sent — for a user, without one, and for the status',
+        );
+        $said = json_encode($results, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE) . (string) file_get_contents($logFile);
+        T::ok(!str_contains($said, 'VKEY') && !str_contains($said, 'tail') && !str_contains($said, 'X-Injected'),
+            'and no part of the key is in a result, a message or the log');
+        T::ok(str_contains((string) ($results[2]['message'] ?? ''), 'PULSE_SERVICE_KEY is not usable'),
+            'the message names the setting, never its value');
+    }
+    Env::load(dirname(__DIR__) . '/.env');
+    putenv('PULSE_SERVICE_KEY');
+    ini_set('error_log', $previousLog === false ? '' : $previousLog);
+    @unlink($logFile);
+    @unlink($envFile);
+    AiClient::resetForTesting();
 
     // --- Intent and narration keep their own rules ----------------------------
     $sent = [];
@@ -1386,6 +1510,18 @@ T::group('25. AI runs through AI Pulse');
     T::ok(array_key_exists('available', $healthAi) && $healthAi['available'] === null
         && ($healthAi['service'] ?? null) === 'AI Pulse' && count($sent) === 0,
         'the unauthenticated health check does not ask Pulse without a service key, and says so');
+
+    putenv('PULSE_SERVICE_KEY=test-voice-gateway-key');
+    $sent = [];
+    $replies = [$pulseStatus(true)];
+    $health = request('GET', '/health');
+    T::same(
+        [true, ['Accept: application/json', 'X-Pulse-Product: voice', 'X-Pulse-Service-Key: test-voice-gateway-key']],
+        [$health['body']['data']['ai']['available'] ?? null, $sent[0]['raw'] ?? null],
+        'with PULSE_SERVICE_KEY set, the health check asks Pulse with the gateway key alone (a call with no user)',
+    );
+    T::ok(!str_contains((string) json_encode($health['body']), 'test-voice-gateway-key'), 'and never shows the key');
+    putenv('PULSE_SERVICE_KEY');
 
     // --- Where Pulse lives ---------------------------------------------------------
     // The origin follows the CONFIGURED environment; the request's Host is a
