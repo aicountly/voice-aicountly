@@ -36,8 +36,9 @@ const forbidden = [
   'generativelanguage.googleapis.com', 'api.openai.com', 'api.anthropic.com', 'x-goog-api-key',
   '@google/generative-ai', '@google/genai', '@anthropic-ai/', 'openai', 'anthropic', 'gemini',
   'gemini_api_key', 'openai_api_key', 'anthropic_api_key', '_ai_api_key', '_ai_model',
-  // Pulse's gateway is server to server only.
-  '/api/ai/v1/', 'x-pulse-product', 'x-pulse-service-key',
+  // Pulse's gateway is server to server only, and Voice's gateway key
+  // (PULSE_SERVICE_KEY) is a server-side secret in api/.env, never in a build.
+  '/api/ai/v1/', 'x-pulse-product', 'x-pulse-service-key', 'pulse_service_key',
 ]
 
 test('no model provider, model key or direct gateway call is in the app', () => {

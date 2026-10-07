@@ -220,27 +220,40 @@ never names a credential's value.
 
 ### AI
 
-Voice's AI runs through the AI Pulse gateway, with the signed-in user's own
-session. There is no model key, model name or provider to configure here:
+Voice's AI runs through the AI Pulse gateway, with Voice's own gateway key and
+the signed-in user's own session. There is no model key, model name or provider
+to configure here:
 
 ```
 VOICE_AI_ENABLED=1
 # PULSE_API_ORIGIN=https://pulse.aicountly.com   only to override the host-derived origin
-# PULSE_SERVICE_KEY=…                            only for AI a service caller (no user) starts
+# Voice's own AI Pulse gateway key, sent on every AI call:
+PULSE_SERVICE_KEY=…
 ```
 
 `PULSE_API_ORIGIN` left unset means production Pulse on voice.aicountly.com and
 the sandbox, https://pulse.gh.aicountly.com, on voice.gh.aicountly.com.
-`PULSE_SERVICE_KEY` falls back to `CONSOLE_SERVICE_KEY`.
+
+`PULSE_SERVICE_KEY` is this product's own AI Pulse gateway key, minted on Pulse
+with `php spark pulse:gateway-key mint voice` (production and sandbox Pulse each
+mint their own), and set in `api/.env` on the server only — never in a `VITE_*`
+variable. It is sent on every AI call as `X-Pulse-Service-Key`, beside
+`X-Pulse-Product: voice` and the user's session. Until it is set a user's call
+goes with the session alone, which Pulse accepts only until **2026-11-15
+(UTC)**; after that Pulse answers 401 `product_key_required` and summaries fall
+back to the rule-based path. `CONSOLE_SERVICE_KEY` is no fallback (Pulse retires
+it with 401 `service_key_retired`). A value holding a line break or another
+control character is refused and nothing is sent.
 
 When moving an existing deployment onto AI Pulse:
 
 1. Deploy, then run `php bin/migrate.php` straight away: 009 adds the column
    that keeps Pulse's id on each model-written summary, and until it has run
    such a summary cannot be saved.
-2. Delete `CONSOLE_API_URL` from `api/.env` — nothing reads it any more. Rename
-   `CONSOLE_SERVICE_KEY` to `PULSE_SERVICE_KEY`, or delete it if no other
-   product calls Voice for summaries with a service key.
+2. Delete `CONSOLE_API_URL` from `api/.env` — nothing reads it any more, and
+   neither does anything read `CONSOLE_SERVICE_KEY`: delete it. Set
+   `PULSE_SERVICE_KEY` to the key minted for `voice` on that environment's Pulse
+   (do not reuse the Console key — Pulse refuses it).
 3. Set `VOICE_AI_ENABLED=1` if it is not already: it is now the only switch.
 4. In Console → AI → Domains, switch Voice to **Using AI Pulse** and remove its
    stored keys.
