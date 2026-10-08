@@ -221,7 +221,9 @@ try {
 } catch (\PDOException $e) {
     // A DSN or a bound parameter can appear in a PDO message, and a bound
     // parameter here can be a phone number.
-    error_log('[voice] database error: ' . $e->getMessage());
+    // The reason (console_key_rejected, database_login_refused, ...) first: it says which of the very different
+    // things behind a 503 to look at. A failure to obtain the database name is one of these (DatabaseConnectionException).
+    error_log('[voice] database error [' . DatabaseDiagnosis::classify($e)['reason'] . ']: ' . $e->getMessage());
     Http::error(503, 'database_unavailable', 'The service is temporarily unavailable. Please retry.');
 } catch (\Throwable $e) {
     error_log('[voice] unhandled: ' . $e::class . ' ' . $e->getMessage() . ' at ' . $e->getFile() . ':' . $e->getLine());

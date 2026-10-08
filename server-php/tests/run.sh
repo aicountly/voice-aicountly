@@ -15,6 +15,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# This suite truncates tables: it runs against the test database in the .env written below and never against the one
+# Console names for a real deployment, so a developer's exported Console settings are dropped here.
+# tests/console_database.php sets what it needs for itself.
+unset CONSOLE_API_URL CONSOLE_DB_DETAILS_KEY
+
 DB_NAME="${TEST_DB_NAME:-voice_test}"
 DB_USER="${TEST_DB_USER:-voice_test}"
 DB_PASS="${TEST_DB_PASS:-voice_test}"
@@ -71,6 +76,11 @@ VOICE_SUPPORTED_LANGUAGES=en,hi
 ENVEOF
 
 php "$ROOT/bin/migrate.php" > /dev/null
+
+# Where the database name and username come from (Console's SaaS Database Details, or DB_NAME / DB_USER) and what is
+# said when they cannot be had: the resolver, /api/health, bin/db-check.php and bin/migrate.php. Needs the migrated
+# database above; the cases that take a migration record away put it back.
+php "$ROOT/tests/console_database.php"
 
 php -S "127.0.0.1:$STUB_PORT" "$ROOT/tests/stub/router.php" > /dev/null 2>&1 &
 STUB_PID=$!

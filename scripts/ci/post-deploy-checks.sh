@@ -41,10 +41,23 @@ failed=0
 check() {
   bash "$verify" "$@" || failed=$((failed + 1))
 }
+# check_with_hint <hint> <verify-live.sh arguments...>: the same, and prints <hint> when it warned.
+check_with_hint() {
+  local hint="$1" out
+  shift
+  out="$(bash "$verify" "$@")" || failed=$((failed + 1))
+  printf '%s\n' "$out"
+  case "$out" in
+    *'::warning title=Post-deploy check::'*) echo "  ${hint}" ;;
+  esac
+}
 
 # It is the Voice API (fatal). "degraded" (HTTP 503) means its database is unreachable or not
-# migrated: configuration on the server, not this deploy, so it only warns.
-check json "Voice API (${target})" "${base}/api/health" \
+# migrated: configuration on the server, not this deploy, so it only warns. A console_* reason in
+# .data.database.reason means the database name and username could not be had from Console
+# (CONSOLE_API_URL / CONSOLE_DB_DETAILS_KEY in api/.env); php bin/db-check.php in api/ says which.
+check_with_hint "degraded: the database is unreachable or not migrated. Check the DB_* values in api/.env and the migrations; a console_* .data.database.reason means the name and username could not be had from Console (CONSOLE_API_URL / CONSOLE_DB_DETAILS_KEY) - run php bin/db-check.php in api/." \
+  json "Voice API (${target})" "${base}/api/health" \
   '.data.app == "Voice"' \
   '.data.status == "ok"'
 

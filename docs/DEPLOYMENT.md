@@ -89,11 +89,12 @@ That is the whole file for a production deploy; `APP_ENV=sandbox` for the
 sandbox. `GET /api/health` reports the value back, which is how you confirm
 you are looking at the environment you think you are.
 
-The API has no database yet. When the product needs one, add the credentials to
-this same file — and note that cPanel prefixes both database and user with the
-account name, so a database entered as `app` becomes `<cpaneluser>_app`. Use the
-full prefixed names, add the user to the database with **ALL PRIVILEGES**, and
-set `DB_HOST=localhost` (on cPanel the database is on the same machine).
+The API's database is configured in this same file; see "Voice API: first deploy of
+this release" below. cPanel prefixes both database and user with the account name,
+so a database entered as `app` becomes `<cpaneluser>_app`. Record the full prefixed
+names in Console > SaaS Database Details (the database name and username are not
+set in this file), add the user to the database with **ALL PRIVILEGES**, and set
+`DB_HOST=localhost` (on cPanel the database is on the same machine).
 
 ### Protecting the API's .env over HTTP
 
@@ -165,7 +166,7 @@ cd <document root>/api
 cp .env.example .env
 ```
 
-Fill in `DB_NAME`, `DB_USER`, `DB_PASS`, then:
+Fill in `CONSOLE_API_URL`, `CONSOLE_DB_DETAILS_KEY` and `DB_PASS` (see below), then:
 
 ```bash
 # 32 bytes, base64. WITHOUT THIS, STORING A PROVIDER CREDENTIAL IS REFUSED —
@@ -176,9 +177,46 @@ head -c 32 /dev/urandom | base64
 Put the result in `CREDENTIAL_ENCRYPTION_KEY`. Rotating it later makes existing
 stored credentials undecryptable and they must be re-entered.
 
+**The database name and username are not set in `.env`.** Console > SaaS Database Details records
+them per product and environment, and the API asks Console for them
+(`GET $CONSOLE_API_URL/database-details/resolve`, the key as a bearer token) on every request,
+worker and `bin/migrate.php`. This is the same split Connect uses: Console holds no password,
+host or port, so `DB_PASS`, `DB_HOST`, `DB_PORT` (and the optional `DB_SSLMODE`, `DB_SCHEMA`) stay in
+`api/.env`, and any other field in Console's answer is ignored. The password in `DB_PASS` must belong
+to the (prefixed) user Console names for this row, and that user needs **ALL PRIVILEGES** on the database.
+
+**The variables must be named exactly `CONSOLE_API_URL` and `CONSOLE_DB_DETAILS_KEY`.** The key is
+the per-row key Console shows once under *Generate key* (it starts with `sdb_`); Console shows
+it only once, so *Rotate key* gives a new one if it was not saved, and rotating kills the old
+one. `CONSOLE_SERVICE_KEY` is a different credential and Console rejects it here. If either variable
+is missing, misspelled, commented out or empty, Console is simply never asked: the API quietly uses
+`DB_NAME` / `DB_USER`, and **commenting those out then leaves no database at all**. A key for the other
+environment (production vs sandbox) is refused. `DB_NAME` / `DB_USER` are a local-development fallback
+only: they are not read while both Console variables are set.
+
+To see where the connection really comes from, and whether the database accepts it, run on the
+server (from `api/`): `php bin/db-check.php`. It asks Console right now (cache bypassed), prints
+what Console answered, connects, and checks that every migration is applied; it never prints
+the key or the password, and ends with a `Reason:` and what to do when something is wrong.
+`/api/health` reports the same: `data.database.source` is `console` when Console supplies the name and
+username and `env` when `DB_NAME` / `DB_USER` do (on a deployed server it should say `console`),
+and a failure to obtain them is reported by its own `data.database.reason` with a `data.database.hint`:
+
+| `database.reason` | What it means | Fix |
+| --- | --- | --- |
+| `console_key_missing` | `CONSOLE_API_URL` is set but `CONSOLE_DB_DETAILS_KEY` is not (and `DB_NAME` / `DB_USER` are not set), so Console is never asked | put the `sdb_` key generated in Console > SaaS Database Details in `CONSOLE_DB_DETAILS_KEY` |
+| `console_url_missing` | `CONSOLE_DB_DETAILS_KEY` is set but `CONSOLE_API_URL` is not | `CONSOLE_API_URL=https://console.aicountly.org/api` |
+| `console_key_rejected` | Console answered 401: the key is revoked, rotated or wrong | generate a key on this deployment's row in Console |
+| `console_row_inactive` | Console answered 403: the row is inactive | activate it in Console > SaaS Database Details |
+| `console_unreachable` | this server could not reach Console (and no earlier answer is cached) | check `CONSOLE_API_URL` and outbound HTTPS |
+| `console_environment_mismatch` | the key belongs to the other environment | use the key from this deployment's own row |
+| `console_no_database_recorded` | Console has no database name and username for this row | record them in Console |
+| `not_configured` | neither the two Console settings nor `DB_NAME` + `DB_USER` are set | `api/.env` |
+
 ### 2. Apply the schema
 
 ```bash
+php bin/db-check.php            # is the database reached, and from where?
 php bin/migrate.php --status    # what would run, changes nothing
 php bin/migrate.php             # apply it
 ```
