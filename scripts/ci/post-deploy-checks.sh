@@ -10,7 +10,8 @@
 #
 # Environment:
 #   VERIFY_SSH         command prefix that runs one command on the server ("ssh deploy-target"
-#                      in the workflows); see verify-live.sh.
+#                      in the workflows); see verify-live.sh. Set: the must-not-be-served probes
+#                      are asked from the server only.
 #   EXPECTED_ENTRY     the hashed entry script of the build just deployed, e.g.
 #                      assets/index-C5tx8mVh.js from web/dist/index.html. Empty (checking without
 #                      a deploy): the page's <title> is checked instead.
@@ -64,6 +65,8 @@ fi
 # SQL, tests, scripts or dependency manifests. Read-only GETs of the first 64 KB, never of a .php
 # file under tests/, bin/ or scripts/ (a GET would run it); a failure logs the status, type and
 # size of what was served, never its content. /.git/HEAD may instead get the SPA's own page.
+# With VERIFY_SSH they are asked from the server itself, never from the runner (verify-live.sh,
+# absent): the host's WAF graylists a runner that asks for these, and its SSH with it.
 for path in /api/.env /api/.env.example /api/error_log \
   /api/database/migrations/001_voice_foundation.sql /api/tests/run.sh /api/bin/; do
   check absent "Voice ${path} must not be served (${target})" "${base}${path}"

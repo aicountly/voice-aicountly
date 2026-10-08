@@ -323,7 +323,10 @@ jobs:
       # checks need the app's real answer: its health JSON (no credentials needed)
       # and this build's entry script on the web root. When the runner is shown
       # the anti-bot page, the request is repeated from the server over SSH
-      # (deploy-target, still configured here). A wrong answer fails the deploy.
+      # (deploy-target, still configured here). The paths that must not be served
+      # (api/.env, error_log, .git/HEAD ...) are asked from the server only: the
+      # host's WAF graylists a runner that asks for them, SSH included. A wrong
+      # answer fails the deploy.
       - name: Verify the live app
         env:
           VERIFY_SSH: ssh deploy-target
