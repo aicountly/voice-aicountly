@@ -1564,15 +1564,24 @@ T::group('25. AI runs through AI Pulse');
     foreach (['/server-php/index.php', '/server-php/.env.example', '/.env.example', '/web/package.json', '/web/index.html'] as $file) {
         $scanned[] = $root . $file;
     }
+    // CONSOLE_API_URL names the Console API for ONE purpose here: asking Console for this product's database name and
+    // username (SaaS Database Details). Those files may say so; no other file may mention it, and none of them may
+    // reach an AI route (the needles below still apply to them).
+    $databaseDetailsFiles = ['server-php/src/ConsoleDatabaseDetails.php', 'server-php/src/DatabaseDiagnosis.php', 'server-php/src/Db.php',
+        'server-php/src/Health.php', 'server-php/bin/db-check.php', 'server-php/.env.example'];
     $found = [];
     foreach ($scanned as $path) {
         $source = strtolower((string) file_get_contents($path));
+        $relative = substr($path, strlen($root) + 1);
         foreach ([
             'generativelanguage.googleapis.com', 'api.openai.com', 'api.anthropic.com', 'x-goog-api-key',
             '@google/generative-ai', '@google/genai', '@anthropic-ai/', 'openai', 'anthropic', 'gemini',
             'ai/credentials/resolve', 'ai/usage', 'consolecredentials', 'console_api_url',
             'gemini_api_key', 'openai_api_key', 'anthropic_api_key', '_ai_api_key', '_ai_model',
         ] as $needle) {
+            if ($needle === 'console_api_url' && in_array($relative, $databaseDetailsFiles, true)) {
+                continue;
+            }
             if (str_contains($source, $needle)) {
                 $found[] = substr($path, strlen($root) + 1) . ' contains ' . $needle;
             }
@@ -1580,6 +1589,8 @@ T::group('25. AI runs through AI Pulse');
     }
     T::ok(count($scanned) > 100, 'the guard reads the whole app (' . count($scanned) . ' files)');
     T::same([], $found, 'no model provider host, SDK, model key or Console AI lookup remains in app code');
+    $resolver = (string) file_get_contents($root . '/server-php/src/ConsoleDatabaseDetails.php');
+    T::ok(substr_count($resolver, '/database-details/resolve') >= 1 && !str_contains($resolver, '/ai/'), 'the one Console call the app makes is the database-details lookup, not an AI route');
 
     AiClient::useClientForTesting(null);
     Features::overrideForTesting(null);
