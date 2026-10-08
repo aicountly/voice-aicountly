@@ -190,7 +190,7 @@ npm run dev              # http://localhost:5173
 
 # Backend
 cd server-php
-cp .env.example .env     # set APP_ENV=local and the DB_* values
+cp .env.example .env     # set APP_ENV=local and the DB_* values (DB_NAME / DB_USER locally; Console names them on a server)
 php bin/migrate.php      # apply the schema
 php -S localhost:8000
 ```
@@ -320,7 +320,7 @@ After the first deploy of this release, on the server:
 
 ```bash
 cd <document root>/api
-cp .env.example .env     # fill in DB_*, CREDENTIAL_ENCRYPTION_KEY and the rest
+cp .env.example .env     # fill in CONSOLE_API_URL + CONSOLE_DB_DETAILS_KEY, DB_PASS, CREDENTIAL_ENCRYPTION_KEY and the rest
 php bin/migrate.php
 ```
 
