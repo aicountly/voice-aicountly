@@ -89,7 +89,7 @@ export function clearSession(): void {
   sesExpiry = 0
 }
 
-/** Full sign-out: drops the session key, the auth token and the shared cookie. */
+/** Full sign-out: drops the session key and the auth token, and purges a leftover legacy cookie (.aicountly.com only). */
 export function clearAllTokens(): void {
   clearSession()
   authToken = null

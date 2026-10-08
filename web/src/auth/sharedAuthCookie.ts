@@ -5,8 +5,14 @@
  * *.aicountly.com page could read it (30 days, not HttpOnly), so it was retired
  * for security. Cross-product sign-in is the portal hand-off
  * (my.aicountly.com /login/authentication_jump/<product_key>, backed by the
- * portal's httpOnly cookie). This module is kept for one release only so callers
- * keep compiling and cookies already in browsers are purged; delete it next release.
+ * portal's httpOnly `AIC_AUTH_TOKEN` cookie). This module is kept for one
+ * release only so callers keep compiling and cookies already in browsers are
+ * purged; delete it next release.
+ *
+ * The purge only ever runs on .aicountly.com and only ever expires the cookie
+ * on `domain=.aicountly.com` — the one place the old module wrote it. On any
+ * other host (localhost, a custom domain) an `auth_token` cookie belongs to
+ * something else and is left alone.
  */
 
 const AUTH_TOKEN_COOKIE = 'auth_token'
@@ -30,21 +36,24 @@ export function readSharedAuthToken(): string | null {
 /** Retired: a JavaScript-readable cookie must never carry the token again. */
 export function writeSharedAuthToken(_token: string): void {}
 
-/** Expire `auth_token` on the shared parent domain (if any) and host-only. */
+/** Expire `auth_token` on `.aicountly.com`; does nothing on any other host. */
 export function clearSharedAuthToken(): void {
   if (typeof document === 'undefined') return
+  const domain = getSharedCookieDomain()
+  if (!domain) return
 
   const secure = window.location.protocol === 'https:' ? '; Secure' : ''
-  const expiry = `${AUTH_TOKEN_COOKIE}=; path=/; max-age=0; SameSite=Lax${secure}`
-  const domain = getSharedCookieDomain()
-  if (domain) document.cookie = `${expiry}; domain=${domain}`
-  document.cookie = expiry
+  document.cookie = `${AUTH_TOKEN_COOKIE}=; domain=${domain}; path=/; max-age=0; SameSite=Lax${secure}`
 }
 
-/** Remove a legacy `auth_token` cookie still sitting in this browser. Never throws. */
+/**
+ * Remove a legacy `auth_token` cookie still sitting in this browser. Only on
+ * .aicountly.com (see clearSharedAuthToken). Never throws.
+ */
 export function purgeLegacySharedAuthToken(): void {
   try {
     if (typeof document === 'undefined') return
+    if (!getSharedCookieDomain()) return
     const prefix = `${AUTH_TOKEN_COOKIE}=`
     const present = document.cookie.split(';').some((part) => part.trim().startsWith(prefix))
     if (present) clearSharedAuthToken()
