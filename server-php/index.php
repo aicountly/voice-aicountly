@@ -194,7 +194,12 @@ if ($path === 'session') {
         Http::unauthorized('Missing bearer session key.');
     }
 
-    $session = Portal::validateSesKey($sesKey);
+    $checked = Portal::checkSesKey($sesKey);
+    if ($checked['state'] === 'unavailable') {
+        // The portal could not say. Not a sign-out: 503 + Retry-After (E8-ID / MY-AW-04).
+        Http::authUnavailable((int) $checked['retry_after']);
+    }
+    $session = $checked['session'];
     if ($session === null) {
         Http::unauthorized('Invalid or expired session.');
     }
