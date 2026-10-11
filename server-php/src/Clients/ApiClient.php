@@ -248,7 +248,7 @@ abstract class ApiClient
      * every company-scoped request and logging each one buries the failures the
      * log exists to surface.
      */
-    private function log(string $outcome, string $path, int $status, float $ms, ?string $reason): void
+    protected function log(string $outcome, string $path, int $status, float $ms, ?string $reason): void
     {
         $operation = explode('?', ltrim($path, '/'))[0];
         error_log(sprintf(

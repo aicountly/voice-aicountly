@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Aicountly\Api\Clients;
 
 use Aicountly\Api\Env;
+use Aicountly\Api\Environment;
 use Aicountly\Api\Features;
 
 /**
@@ -54,17 +55,46 @@ final class MessagingClient extends ApiClient
         return Features::enabled('MESSAGING');
     }
 
-    /** @param array<string, mixed> $payload */
+    /**
+     * Messaging's service send (E8-ID / F155): `POST v1/messages`, which Messaging serves — the
+     * old `messages` path was never one of its routes — with the environment this call is meant
+     * for. Messaging refuses a service call without X-AIC-Environment equal to its own (401
+     * service_environment_mismatch), so with no environment configured here nothing is sent.
+     *
+     * @param array<string, mixed> $payload
+     */
     public function send(array $payload, string $correlationId): array
     {
-        return $this->request('POST', 'messages', $payload, $this->headers([
+        $refused = $this->environmentRefusal('v1/messages');
+        if ($refused !== null) {
+            return $refused;
+        }
+
+        return $this->request('POST', 'v1/messages', $payload, $this->headers([
             'Idempotency-Key' => $correlationId,
         ]), true);
     }
 
-    public function message(string $messageRef): array
+    public function message(string $messageRef, int $cmpId): array
     {
-        return $this->request('GET', 'messages/' . rawurlencode($messageRef), null, $this->headers());
+        $path = 'v1/messages/' . rawurlencode($messageRef) . '?' . http_build_query(['cmp_id' => $cmpId]);
+        $refused = $this->environmentRefusal($path);
+        if ($refused !== null) {
+            return $refused;
+        }
+
+        return $this->request('GET', $path, null, $this->headers());
+    }
+
+    /** @return array{ok:bool, status:int, body:?array, error:?string}|null */
+    private function environmentRefusal(string $path): ?array
+    {
+        if (Environment::current() !== null) {
+            return null;
+        }
+        $this->log('refused', $path, 0, 0.0, 'environment_not_configured');
+
+        return ['ok' => false, 'status' => 0, 'body' => null, 'error' => 'environment_not_configured'];
     }
 
     public function health(): array
@@ -79,7 +109,7 @@ final class MessagingClient extends ApiClient
         if ($key === '') {
             return $extra;
         }
-        $headers = $extra + ['X-Service-Key' => $key];
+        $headers = $extra + ['X-Service-Key' => $key, 'X-AIC-Environment' => (string) Environment::current()];
         if ($this->actorUuid !== '') {
             $headers['X-Actor-Uuid'] = $this->actorUuid;
         }
