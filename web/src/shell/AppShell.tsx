@@ -20,13 +20,19 @@ import { useVoice } from '../context/VoiceContext'
 import { APP_ENV } from '../config'
 import { Badge, Button, EmptyState, LoadingRows, Notice } from '../ui'
 import { visibleNav } from './navConfig'
+import { accessStatusLabel } from '../company-access/index.ts'
+import { BrowseCompaniesButton, RestrictedCompanyNotice } from './CompanyDiscovery'
 import './app-shell.css'
 
 export function AppShell() {
-  const { company, companies, branchId, switchCompany, switchBranch, can, status, error, reload } = useVoice()
+  const { company, companies, branchId, switchCompany, switchBranch, isRestricted, can, status, error, reload } = useVoice()
   const { signOut } = useAuth()
   const navigate = useNavigate()
   const [query, setQuery] = useState('')
+  // A company Manage lists (in the person's workspace) but does not open to them in Voice:
+  // choosing it explains and offers "Request access" instead of switching.
+  const [restrictedId, setRestrictedId] = useState<number | null>(null)
+  const restricted = restrictedId === null ? null : companies.find((entry) => entry.cmp_id === restrictedId) ?? null
 
   // The simplified view is the default. An administrator turns the rest on.
   const [showAdvanced, setShowAdvanced] = useState(() => readAdvanced())
@@ -44,8 +50,13 @@ export function AppShell() {
       <div className="vpage" style={{ maxWidth: 620, paddingTop: 60 }}>
         <EmptyState
           title="No companies are available to you"
-          body="Voice works inside an AICOUNTLY company. Ask an administrator to add you to one, then reload."
-          action={<Button onClick={reload}>Try again</Button>}
+          body="Voice works inside an AICOUNTLY company. Search your workspace companies first — the company may already be registered, and its owner can give you access. Only if it is not there, create it in Aicountly Manage."
+          action={(
+            <div className="vactions">
+              <BrowseCompaniesButton variant="primary" />
+              <Button onClick={reload}>Try again</Button>
+            </div>
+          )}
         />
       </div>
     )
@@ -127,12 +138,25 @@ export function AppShell() {
             <select
               id="company-picker"
               value={company.cmp_id}
-              onChange={(event) => switchCompany(Number(event.target.value))}
+              onChange={(event) => {
+                const next = Number(event.target.value)
+                if (isRestricted(next)) {
+                  setRestrictedId(next)
+                  return
+                }
+                switchCompany(next)
+              }}
             >
               {companies.map((entry) => (
-                <option key={entry.cmp_id} value={entry.cmp_id}>{entry.name}</option>
+                <option key={entry.cmp_id} value={entry.cmp_id}>
+                  {isRestricted(entry.cmp_id)
+                    ? `${entry.name} — ${accessStatusLabel(entry.app_access_status ?? 'ACCESS_RESTRICTED')}`
+                    : entry.name}
+                </option>
               ))}
             </select>
+            <BrowseCompaniesButton compact />
+            {restricted ? <RestrictedCompanyNotice company={restricted} onClose={() => setRestrictedId(null)} /> : null}
 
             {company.branches && company.branches.length > 0 ? (
               <>

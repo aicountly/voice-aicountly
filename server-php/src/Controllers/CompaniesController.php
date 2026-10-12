@@ -32,6 +32,14 @@ use Aicountly\Api\Http;
  *
  * No company name, no branch, no address is written to the Voice database. The
  * switcher shows what Manage says right now, on this request.
+ *
+ * ## Seeing a company is not opening it
+ *
+ * Manage is asked naming Voice (X-Saas-Origin, see ApiClient), so each row may
+ * carry Manage's per-application verdict: `can_open_in_current_app: false` is a
+ * company in the person's workspace they may not open in Voice. It is passed
+ * on (null when Manage gave none) so the switcher shows it as restricted rather
+ * than opening it; the tenant check (Context) refuses it either way.
  */
 final class CompaniesController extends Controller
 {
@@ -79,6 +87,10 @@ final class CompaniesController extends Controller
                 'cmp_id'   => $cmpId,
                 'name'     => (string) ($row['name'] ?? $row['company_name'] ?? $row['cmp_name'] ?? 'Company'),
                 'branches' => $branches,
+                'can_open_in_current_app' => array_key_exists('can_open_in_current_app', $row)
+                    ? $row['can_open_in_current_app'] === true
+                    : null,
+                'app_access_status' => is_string($row['app_access_status'] ?? null) ? $row['app_access_status'] : null,
             ];
         }
 

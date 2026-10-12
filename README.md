@@ -155,6 +155,25 @@ comparison", not 0%. An agent whose console stopped reporting reads "unknown",
 never "available". A call whose provider has gone quiet reads "state unknown"
 rather than looking connected.
 
+## Company access (registry)
+
+Companies and who may open them belong to Aicountly Manage's company registry; Voice keeps no copy.
+
+- **App key:** `voice` (Manage catalog id).
+- **Where the gate names the product:** every call to Manage carries `X-Saas-Origin` / `X-Source-App`
+  = `APP_PRODUCT_KEY` (`server-php/src/Clients/ApiClient.php`; keep it `voice`), so `companyinfo` in
+  `Context::assertAllowed()` is answered for Voice. `ManageCompanyAnswer` reads Manage's 403
+  `COMPANY_ACCESS_REQUIRED` as **denied** (never unavailable), and the API answers 403 with
+  `details.reason = COMPANY_ACCESS_REQUIRED`. `GET /v1/companies` keeps Manage's `can_open_in_current_app` /
+  `app_access_status` per row; a company marked `false` is never selected.
+- **Users & Access:** `/users-access` (nav → Users & Access) renders the shared `CompanyUsersAccessPanel` and
+  `MyWorkspacesPanel` (`web/src/company-access/`, copied verbatim from manage-aicountly
+  `Saas Common Handler/company-access`; client in `web/src/services/companyRegistry.ts`). Permission profiles
+  on the Access screen still decide what people may do inside Voice.
+- **Discovery ≠ access:** the company picker's "Browse all workspace companies" lists every company in the
+  person's workspaces; a restricted one opens "Request access", never the company, and the API re-checks
+  every scoped request with Manage whatever the browser shows.
+
 ## Layout
 
 ```

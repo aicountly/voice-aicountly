@@ -22,7 +22,7 @@ import {
   Activity, BarChart3, Blocks, ClipboardList, Contact, FileAudio,
   Gauge, Hash, LayoutDashboard, ListChecks, Megaphone, MessageSquareText,
   Network, PhoneCall, Radio, Settings as SettingsIcon, ShieldCheck,
-  Sparkles, Users, Workflow,
+  Sparkles, UserCog, Users, Workflow,
   type LucideIcon,
 } from 'lucide-react'
 
@@ -62,6 +62,9 @@ export const NAV: NavItem[] = [
   { to: '/settings', label: 'Settings', icon: SettingsIcon, permission: 'voice.dashboard.view' },
   { to: '/audit', label: 'Audit', icon: ShieldCheck, permission: 'voice.audit.view', advanced: true },
   { to: '/access', label: 'Access', icon: ShieldCheck, permission: 'voice.dashboard.view', advanced: true },
+  // Who may open this company in Voice — the company registry, natively here. Everyone sees their
+  // own access and may ask for it; only the company owner changes it. Not behind a Voice permission.
+  { to: '/users-access', label: 'Users & Access', icon: UserCog },
 ]
 
 /** Nav items this user can actually use. */
