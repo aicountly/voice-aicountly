@@ -12,6 +12,7 @@ use Aicountly\Api\Domain\InboundCalls;
 use Aicountly\Api\Domain\RecordingService;
 use Aicountly\Api\Domain\UsageService;
 use Aicountly\Api\Http;
+use Aicountly\Api\Metering\VoiceMeter;
 use Aicountly\Api\Telephony\ProviderRegistry;
 
 /**
@@ -108,6 +109,8 @@ final class WebhooksController extends Controller
 
         if ($result['outcome'] === 'applied' && CallStateMachine::isTerminal((string) $result['state'])) {
             UsageService::recordCallEstimate($ctx, $callId);
+            // The call's seconds, to Manage's usage meter. Measures only.
+            VoiceMeter::recordCall($cmpId, $callId);
             Audit::fromProvider($ctx, 'voice.call.' . $result['state'], (string) $callId, [
                 'event_type' => $event['event_type'],
             ]);

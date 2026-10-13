@@ -94,6 +94,10 @@ done
 
 php "$ROOT/tests/integration.php"
 
+# Usage metering: what is reported to Manage's usage meter for each ended call,
+# and that a callback or a hang-up answers the same with metering off or broken.
+php "$ROOT/tests/metering.php"
+
 # E8-ID / MY-AW-04: a portal outage is 503 + Retry-After, never 401 (real HTTP through index.php).
 E8ID_API_PORT="${E8ID_API_PORT:-$((STUB_PORT+40))}" E8ID_PORTAL_FAULT_PORT="${E8ID_PORTAL_FAULT_PORT:-$((STUB_PORT+41))}" php "$ROOT/tests/e8id_portal_outage.php"
 
