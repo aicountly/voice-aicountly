@@ -35,6 +35,7 @@ const Integrations = lazy(() => import('./pages/Workspace').then((module) => ({ 
 const Settings = lazy(() => import('./pages/Workspace').then((module) => ({ default: module.Settings })))
 const Audit = lazy(() => import('./pages/Workspace').then((module) => ({ default: module.Audit })))
 const Access = lazy(() => import('./pages/Workspace').then((module) => ({ default: module.Access })))
+const UsersAccess = lazy(() => import('./pages/UsersAccess').then((module) => ({ default: module.UsersAccess })))
 const Reports = lazy(() => import('./pages/Workspace').then((module) => ({ default: module.Reports })))
 
 /**
@@ -87,6 +88,7 @@ export default function App() {
             <Route path="settings" element={<Settings />} />
             <Route path="audit" element={<Audit />} />
             <Route path="access" element={<Access />} />
+            <Route path="users-access" element={<UsersAccess />} />
 
             {/* The portal callback path and anything unknown land on the
                 Command Centre rather than a 404 nobody can act on. */}

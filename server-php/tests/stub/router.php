@@ -85,11 +85,24 @@ if ($path === 'validatesession') {
     stub_json(200, ['status' => 1, 'uuid_aictly' => 101, 'ses_key' => 'stub-ses-key']);
 }
 
+// Company registry: a caller that names its product (?app= or X-Saas-Origin / X-Source-App) is
+// answered for that product — list rows gain app_access_status + can_open_in_current_app, and
+// company 996 (in the caller's workspace, not open in the named product) is refused by companyinfo
+// with 403 COMPANY_ACCESS_REQUIRED. Without a product named, nothing changes.
+$namedApp = strtolower(trim((string) ($_GET['app'] ?? $_SERVER['HTTP_X_SAAS_ORIGIN'] ?? $_SERVER['HTTP_X_SOURCE_APP'] ?? '')));
+
 if ($path === 'companies') {
-    stub_json(200, ['data' => [
+    $rows = [
         ['cmp_id' => 4001, 'name' => 'Acme Enterprises', 'is_creator' => 1],
         ['cmp_id' => 4002, 'name' => 'Northwind Services', 'is_creator' => 1],
-    ]]);
+    ];
+    if ($namedApp !== '') {
+        foreach ($rows as $i => $row) {
+            $rows[$i] += ['app_access_status' => 'OWNER', 'can_open_in_current_app' => true];
+        }
+        $rows[] = ['cmp_id' => 996, 'name' => 'Workspace Co', 'is_creator' => 0, 'app_access_status' => 'ACCESS_RESTRICTED', 'can_open_in_current_app' => false];
+    }
+    stub_json(200, ['data' => $rows]);
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +124,12 @@ if (str_starts_with($path, 'companyinfo')) {
     // 997: an answer about a different company — never read as a yes.
     if ($cmpId === 997) {
         stub_json(200, ['success' => '1', 'data' => ['comp_id' => 1, 'cmp_id' => 1]]);
+    }
+    // 996: in the caller's workspace, not open to them in the product they name.
+    if ($cmpId === 996 && $namedApp !== '') {
+        $msg = 'You can see this company, but you do not have access to it in ' . $namedApp . '. Ask the company owner for access.';
+        stub_json(403, ['success' => false, 'status' => 0, 'code' => 'COMPANY_ACCESS_REQUIRED', 'message' => $msg,
+            'error' => ['code' => 'COMPANY_ACCESS_REQUIRED', 'message' => $msg, 'details' => ['cmp_id' => $cmpId, 'app' => $namedApp]]]);
     }
 
     // The owner of every stub company is user-aaa (the suite's USER) and the

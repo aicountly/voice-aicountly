@@ -1769,6 +1769,18 @@ T::group('37. Company owner comes from Manage companyinfo, not acs_type (I-18, G
     $other = request('GET', '/v1/access', ['cmp_id' => '997']);
     T::same(503, $other['status'], 'an answer about another company is a 503');
 
+    // Company registry: Manage is asked naming Voice, and its 403 COMPANY_ACCESS_REQUIRED (may see
+    // the company, may not open it in Voice) is a definite 403 that says so — never a 503.
+    Context::resetForTesting();
+    $restricted = request('GET', '/v1/access', ['cmp_id' => '996']);
+    T::same(403, $restricted['status'], 'Manage\'s 403 COMPANY_ACCESS_REQUIRED is a 403');
+    T::same('COMPANY_ACCESS_REQUIRED', $restricted['body']['error']['details']['reason'] ?? null, 'carrying Manage\'s reason');
+    $companies = request('GET', '/v1/companies');
+    $byId = array_column($companies['body']['data'] ?? [], null, 'cmp_id');
+    T::same([false, 'ACCESS_RESTRICTED'], [$byId[996]['can_open_in_current_app'] ?? null, $byId[996]['app_access_status'] ?? null],
+        'the switcher list keeps Manage\'s per-application verdict');
+    T::same(true, $byId[4001]['can_open_in_current_app'] ?? null, 'and an open company stays open');
+
     Context::resetForTesting();
     Context::trustForTesting(CMP, $owner, true);
     Auth::adopt($owner);

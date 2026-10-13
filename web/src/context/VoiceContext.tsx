@@ -32,6 +32,15 @@ export interface Company {
   name: string
   bo_id: number
   branches?: Array<{ bo_id: number; name: string }>
+  /** Manage's verdict for Voice (company registry): false = in the workspace, not open here; null = not reported. */
+  can_open_in_current_app?: boolean | null
+  /** Shared registry status (OWNER, ACCESS_GRANTED, ACCESS_RESTRICTED, …) when Manage reported one. */
+  app_access_status?: string | null
+}
+
+/** Absent verdict (a Manage from before per-application access) keeps the old meaning: listed = openable. */
+export function isOpenHere(company: Company): boolean {
+  return company.can_open_in_current_app !== false
 }
 
 interface VoiceContextValue {
@@ -39,6 +48,14 @@ interface VoiceContextValue {
   companies: Company[]
   branchId: number
   switchCompany: (cmpId: number) => void
+  /**
+   * Open a company chosen from the workspace directory: switch to it when it is
+   * already in the list, else read the list again (access granted since it
+   * loaded) and open it from there.
+   */
+  openCompany: (cmpId: number) => void
+  /** Listed by Manage (in the person's workspace) but not open to them in Voice. */
+  isRestricted: (cmpId: number) => boolean
   switchBranch: (boId: number) => void
 
   permissions: string[]
@@ -87,7 +104,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
     // Voice's own endpoint, which reads Manage live. Not the portal auth relay:
     // the portal authenticates people and Manage owns companies.
     api
-      .getGlobal<{ data: Array<{ cmp_id: number; name: string; branches: Array<{ bo_id: number; name: string }> }> }>(
+      .getGlobal<{ data: Array<{ cmp_id: number; name: string; branches: Array<{ bo_id: number; name: string }>; can_open_in_current_app?: boolean | null; app_access_status?: string | null }> }>(
         'v1/companies',
         undefined,
         controller.signal,
@@ -100,17 +117,23 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
           name: row.name,
           bo_id: 0,
           branches: row.branches.length > 0 ? row.branches : undefined,
+          can_open_in_current_app: row.can_open_in_current_app ?? null,
+          app_access_status: row.app_access_status ?? null,
         }))
 
         setCompanies(list)
 
-        if (list.length === 0) {
+        // Only a company open to this person in Voice is ever chosen: one Manage marks
+        // can_open_in_current_app === false stays listed (so nobody registers it again)
+        // but is never entered.
+        const open = list.filter(isOpenHere)
+        if (open.length === 0) {
           setStatus('no-companies')
           return
         }
 
         const remembered = Number(readRemembered())
-        const chosen = list.find((entry) => entry.cmp_id === remembered) ?? list[0]
+        const chosen = open.find((entry) => entry.cmp_id === remembered) ?? open[0]
         setCompany(chosen)
         setScope({ cmp_id: chosen.cmp_id, bo_id: 0 })
         setStatus('ready')
@@ -162,7 +185,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
   const switchCompany = useCallback(
     (cmpId: number) => {
       const next = companies.find((entry) => entry.cmp_id === cmpId)
-      if (!next || next.cmp_id === company?.cmp_id) return
+      if (!next || !isOpenHere(next) || next.cmp_id === company?.cmp_id) return
 
       // Order matters: the client's scope changes before anything refetches.
       setScope({ cmp_id: next.cmp_id, bo_id: 0 })
@@ -173,6 +196,24 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
       remember(next.cmp_id)
     },
     [companies, company],
+  )
+
+  const openCompany = useCallback(
+    (cmpId: number) => {
+      const listed = companies.find((entry) => entry.cmp_id === cmpId)
+      if (listed && isOpenHere(listed)) {
+        switchCompany(cmpId)
+        return
+      }
+      remember(cmpId)
+      setNonce((n) => n + 1)
+    },
+    [companies, switchCompany],
+  )
+
+  const isRestricted = useCallback(
+    (cmpId: number) => companies.some((entry) => entry.cmp_id === cmpId && !isOpenHere(entry)),
+    [companies],
   )
 
   const switchBranch = useCallback(
@@ -197,6 +238,8 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
       companies,
       branchId,
       switchCompany,
+      openCompany,
+      isRestricted,
       switchBranch,
       permissions,
       can,
@@ -209,7 +252,7 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
       error,
       reload: () => setNonce((n) => n + 1),
     }),
-    [company, companies, branchId, switchCompany, switchBranch, permissions, can, settings, status, error],
+    [company, companies, branchId, switchCompany, openCompany, isRestricted, switchBranch, permissions, can, settings, status, error],
   )
 
   return <VoiceContext.Provider value={value}>{children}</VoiceContext.Provider>
