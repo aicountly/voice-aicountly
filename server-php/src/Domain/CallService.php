@@ -8,6 +8,7 @@ use Aicountly\Api\Audit;
 use Aicountly\Api\Auth;
 use Aicountly\Api\Context;
 use Aicountly\Api\Db;
+use Aicountly\Api\Metering\VoiceMeter;
 use Aicountly\Api\Settings;
 use Aicountly\Api\Support\Clock;
 use Aicountly\Api\Support\Uuid;
@@ -253,7 +254,12 @@ final class CallService
         }
 
         if ($action === 'hangup' && $result->isOk()) {
-            CallStateMachine::transition($ctx->cmpId, $callId, 'completed', 'agent_ended');
+            $ended = CallStateMachine::transition($ctx->cmpId, $callId, 'completed', 'agent_ended');
+            // Ended here, so the gateway's own completion will be skipped: the
+            // call's seconds go to Manage's usage meter from this point instead.
+            if ($ended['applied']) {
+                VoiceMeter::recordCall($ctx->cmpId, $callId);
+            }
         }
 
         if ($action === 'monitor' && $result->isOk()) {
