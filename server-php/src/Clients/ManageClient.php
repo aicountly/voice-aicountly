@@ -57,12 +57,19 @@ final class ManageClient extends ApiClient
      */
     public function companyInfo(int $cmpId): array
     {
-        return $this->request(
+        $result = $this->request(
             'GET',
             'companyinfo' . self::query(['comp_id' => $cmpId]),
             null,
             ['Authorization' => $this->authorization],
         );
+
+        // companyinfo carries the company lifecycle (`lifecycle`, `restricted_until`), and Manage is its
+        // source of truth: written through here, so a lifecycle event this product missed is corrected
+        // by the next read. Never throws.
+        \Aicountly\Api\CompanyLifecycle::syncFromCompanyInfo($cmpId, $result);
+
+        return $result;
     }
 
     /** Companies this session may open — the company switcher. */

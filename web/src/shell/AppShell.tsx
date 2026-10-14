@@ -23,6 +23,7 @@ import { visibleNav } from './navConfig'
 import { accessStatusLabel } from '../company-access/index.ts'
 import { BrowseCompaniesButton, RestrictedCompanyNotice } from './CompanyDiscovery'
 import './app-shell.css'
+import { CompanyRestrictedBanner } from '../components/CompanyRestrictedBanner'
 
 export function AppShell() {
   const { company, companies, branchId, switchCompany, switchBranch, isRestricted, can, status, error, reload } = useVoice()
@@ -194,6 +195,7 @@ export function AppShell() {
         </header>
 
         <main id="main" tabIndex={-1} className="vpage">
+          <CompanyRestrictedBanner cmpId={company.cmp_id} />
           {/* The tenant boundary. See the file comment. */}
           <div key={`${company.cmp_id}:${branchId}`}>
             <Suspense fallback={<LoadingRows rows={5} height={72} />}>

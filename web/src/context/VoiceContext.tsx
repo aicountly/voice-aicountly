@@ -26,6 +26,7 @@ import type { ReactNode } from 'react'
 
 import { ApiError, api, setScope } from '../services/api'
 import type { AccessInfo, VoiceSettings } from '../services/types'
+import { noteCompanyLifecycle } from '../services/companyRestriction'
 
 export interface Company {
   cmp_id: number
@@ -168,6 +169,8 @@ export function VoiceProvider({ children }: { children: ReactNode }) {
       .then(([accessResponse, settingsResponse]) => {
         if (controller.signal.aborted || company.cmp_id !== forCompany) return
         setAccess(accessResponse.data)
+        // Manage's company lifecycle as the API enforces it: the read-only banner.
+        noteCompanyLifecycle(forCompany, (accessResponse.data as { lifecycle?: unknown }).lifecycle)
         setSettings(settingsResponse.data)
       })
       .catch((err: unknown) => {

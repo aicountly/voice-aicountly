@@ -81,6 +81,17 @@ final class Context
      */
     public function assertAllowed(Auth $auth): void
     {
+        $this->assertAccess($auth);
+
+        // Manage's company lifecycle: only now that the caller may open the company (a stranger got
+        // 403 above), a company whose Voice subscription lapsed answers its writes with 423
+        // COMPANY_RESTRICTED — view and export only — for people, stream tickets and products alike.
+        CompanyLifecycle::enforce($this->cmpId);
+    }
+
+    /** The company check itself (assertAllowed() adds the lifecycle write gate after it). */
+    private function assertAccess(Auth $auth): void
+    {
         if ($auth->isService() && !$auth->hasVerifiedActor()) {
             // A product acting as itself may act only for companies explicitly
             // bound to it (ServicePolicy). Naming a cmp_id is not enough.

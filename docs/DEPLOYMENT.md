@@ -240,6 +240,10 @@ Voice-owned work only. None of these copies another product's database.
 
 # Retention. Off-peak: it deletes recordings, transcripts and index entries.
 17 3 * * * cd /home/<user>/public_html/api && php bin/retention.php >> ~/logs/voice-retention.log 2>&1
+
+# Manage's company lifecycle (COMPANY_LIFECYCLE.md): runs the purges Manage queued, deletes the
+# purged recordings (retried until gone), and acks Manage.
+*/5 * * * * cd /home/<user>/public_html/api && php lib/company-lifecycle/bin/worker.php --bootstrap=config/lifecycle-kit.php >> ~/logs/voice-company-lifecycle.log 2>&1
 ```
 
 Run `php bin/retention.php --dry-run` first on a live database to see what is
