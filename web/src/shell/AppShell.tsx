@@ -13,7 +13,7 @@
 
 import { Suspense, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { Bell, LogOut, PhoneCall, Search, Settings2 } from 'lucide-react'
+import { Bell, LogOut, PhoneCall, Search, Settings2, UserCog } from 'lucide-react'
 
 import { useAuth } from '../auth/AuthProvider'
 import { useVoice } from '../context/VoiceContext'
@@ -22,6 +22,7 @@ import { Badge, Button, EmptyState, LoadingRows, Notice } from '../ui'
 import { visibleNav } from './navConfig'
 import { accessStatusLabel } from '../company-access/index.ts'
 import { BrowseCompaniesButton, RestrictedCompanyNotice } from './CompanyDiscovery'
+import { manageProfilePath, openManagePortal } from '../services/appLauncher'
 import './app-shell.css'
 
 export function AppShell() {
@@ -150,8 +151,8 @@ export function AppShell() {
               {companies.map((entry) => (
                 <option key={entry.cmp_id} value={entry.cmp_id}>
                   {isRestricted(entry.cmp_id)
-                    ? `${entry.name} — ${accessStatusLabel(entry.app_access_status ?? 'ACCESS_RESTRICTED')}`
-                    : entry.name}
+                    ? `${entry.name} (ID: ${entry.cmp_id}) — ${accessStatusLabel(entry.app_access_status ?? 'ACCESS_RESTRICTED')}`
+                    : `${entry.name} (ID: ${entry.cmp_id})`}
                 </option>
               ))}
             </select>
@@ -188,6 +189,13 @@ export function AppShell() {
           </form>
 
           <Button variant="ghost" className="vbell" title="Notifications" aria-label="Notifications" icon={Bell} />
+          <Button
+            variant="ghost"
+            onClick={() => openManagePortal(manageProfilePath())}
+            icon={UserCog}
+            title="Manage profile (opens Manage in a new tab)"
+            aria-label="Manage profile (opens in a new tab)"
+          />
           <Button variant="ghost" onClick={signOut} icon={LogOut} title="Sign out">
             <span className="sr-only">Sign out</span>
           </Button>
