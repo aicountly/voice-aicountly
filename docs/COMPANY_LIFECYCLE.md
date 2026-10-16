@@ -4,7 +4,7 @@ Manage decides **when** a company that stopped paying for Voice becomes read-onl
 only, for 45 days), and when its data here is deleted; Voice decides **how**, through a reviewed
 manifest. Manage also asks, when an AICOUNTLY account is closed, for that person's own non-company data
 to be deleted. Contract: manage-aicountly `docs/company-lifecycle/README.md`. Implementation: the
-AICOUNTLY company-lifecycle receiver kit **v1.1.0**, vendored unchanged at
+AICOUNTLY company-lifecycle receiver kit **v1.1.1**, vendored unchanged at
 `server-php/lib/company-lifecycle/` (copy it again from manage-aicountly
 `Saas Common Handler/company-lifecycle/` to update; never edit it here).
 
@@ -29,7 +29,7 @@ AICOUNTLY company-lifecycle receiver kit **v1.1.0**, vendored unchanged at
 * **company_tables — everything company-scoped.** Call recordings and transcripts are personal data that no statute requires Voice to keep, and nothing retained here refers to them (Voice retains nothing), so they are purged with the calls. Calls, legs, participants, summaries, commitments, quality reviews, voicemails, campaigns, flows, AI agents, numbers, queues, teams, agents, settings, access, suppressions, usage estimates (`voice_usage_entries` is Voice's own estimate for budgets; the billed usage is metered in Manage) and Voice's own audit trail (who played a recording, who changed a flow — no statute) all go. Archived first, children before parents.
 * **company_retain — none.**
 * **A legal hold holds the purge** (kit 1.1): while any of the company's recordings is under legal hold (`voice_recordings.legal_hold`, not yet deleted) the company purge is **held** — nothing is touched, Manage is acked `held` with `detail.reason` (Manage marks the purge `blocked`, legal_hold, and alerts ops once), the worker looks at the job again daily and purges (ack `purged`) once the hold is cleared. An account purge is held the same way while a recording of a call the person took part in as an agent is under hold. The hold is set and cleared inside Voice (the retention sweeper, `bin/retention.php`, already respects it); the lifecycle only reads it.
-* **Retention periods / scrub** (kit 1.1): none — nothing is retained, so `--expire-retained` has nothing to expire; no retained row holds personal fields.
+* **Retention periods / scrub** (kit 1.1): none — nothing is retained, so `--expire-retained` has nothing to expire; no retained row holds personal fields. Kit 1.1.1 (retention groups): nothing retained, so no group roots — `--check-manifest` reports no warnings and no `expiry_groups`; the optional `schema-1.1.1.sql` (group columns in the expiry record) is not added, as no group can expire here.
 * **user_tables** — `voice_saved_searches` and `voice_stream_tickets`: the person's own, in every company. Agents and access grants that name the person are the company's records (ignore, user scope).
 
 A migration that adds a table with a company column (or a personal one) must list it in the manifest in
