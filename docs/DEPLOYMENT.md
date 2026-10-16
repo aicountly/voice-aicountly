@@ -243,9 +243,10 @@ Voice-owned work only. None of these copies another product's database.
 
 # Manage's company lifecycle (COMPANY_LIFECYCLE.md): runs the purges Manage queued, deletes the
 # purged recordings (retried until gone), and acks Manage.
-*/5 * * * * cd /home/<user>/public_html/api && php lib/company-lifecycle/bin/worker.php --bootstrap=config/lifecycle-kit.php >> ~/logs/voice-company-lifecycle.log 2>&1
+# Each line below reports to Console's Cron Job Monitor after the run (monitor in MON=; key CONSOLE_CRON_MONITOR_KEY in the api .env; never fails the line) — console-react-app docs/CRON_MONITORS.md.
+*/5 * * * * cd /home/<user>/public_html/api && php lib/company-lifecycle/bin/worker.php --bootstrap=config/lifecycle-kit.php >> ~/logs/voice-company-lifecycle.log 2>&1; RC=$?; MON=voice.company_lifecycle; KEY=$(sed -n 's/^CONSOLE_CRON_MONITOR_KEY *= *//p' .env | tr -d "\"' \r"); BASE=$(sed -n 's/^CONSOLE_API_BASE *= *//p' .env | tr -d "\"' \r"); [ -n "$KEY" ] && curl -fsS -m 5 -o /dev/null -X POST "${BASE:-https://console.aicountly.org/api}/portal/cron-heartbeat" -H "X-Console-Cron-Key: $KEY" -H 'Content-Type: application/json' -d "{\"monitor\":\"$MON\",\"run_id\":\"$MON-$(date +\%s)-$$\",\"outcome\":\"$([ $RC = 0 ] && echo ok || echo error)\",\"finished_at\":$(date +\%s)}" || true
 # … and its daily retention expiry (kit 1.1; Console monitors voice.company_lifecycle, voice.company_lifecycle_expiry).
-37 3 * * * cd /home/<user>/public_html/api && php lib/company-lifecycle/bin/worker.php --bootstrap=config/lifecycle-kit.php --expire-retained >> ~/logs/voice-company-lifecycle.log 2>&1
+37 3 * * * cd /home/<user>/public_html/api && php lib/company-lifecycle/bin/worker.php --bootstrap=config/lifecycle-kit.php --expire-retained >> ~/logs/voice-company-lifecycle.log 2>&1; RC=$?; MON=voice.company_lifecycle_expiry; KEY=$(sed -n 's/^CONSOLE_CRON_MONITOR_KEY *= *//p' .env | tr -d "\"' \r"); BASE=$(sed -n 's/^CONSOLE_API_BASE *= *//p' .env | tr -d "\"' \r"); [ -n "$KEY" ] && curl -fsS -m 5 -o /dev/null -X POST "${BASE:-https://console.aicountly.org/api}/portal/cron-heartbeat" -H "X-Console-Cron-Key: $KEY" -H 'Content-Type: application/json' -d "{\"monitor\":\"$MON\",\"run_id\":\"$MON-$(date +\%s)-$$\",\"outcome\":\"$([ $RC = 0 ] && echo ok || echo error)\",\"finished_at\":$(date +\%s)}" || true
 ```
 
 Run `php bin/retention.php --dry-run` first on a live database to see what is
