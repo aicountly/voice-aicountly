@@ -214,6 +214,42 @@ export function launchApp(app: AicountlyAppDef | null | undefined, options: Laun
   window.location.assign(url)
 }
 
+/** Only allow in-app hash routes on the Manage SPA. */
+export function sanitizeManagePath(path: string | null | undefined): string {
+  if (!path || typeof path !== 'string') return '/dashboard'
+  const normalized = path.startsWith('/') ? path : `/${path}`
+  if (normalized.startsWith('//') || normalized.includes('://')) return '/dashboard'
+  if (!/^\/[\w\-/.?=&%]*$/.test(normalized)) return '/dashboard'
+  return normalized
+}
+
+/** Manage page where the signed-in person edits their own profile. */
+export function manageProfilePath(): string {
+  return '/profile'
+}
+
+/**
+ * A page in Manage, reached the same way the launcher's Manage tile is — the
+ * portal's authentication_jump, no credential in the URL — with Manage's
+ * callback told where to land (`next`).
+ */
+export function buildManagePortalUrl(path: string, sandbox: boolean = isSandboxHost()): string {
+  const next = sanitizeManagePath(path)
+  const manage = getAppById('manage')
+  if (!manage) return `${getManageApiOrigin(sandbox)}/#${next}`
+  if (!manage.jumpKey) return `${resolveAppOrigin(manage, sandbox)}/#${next}`
+
+  const callbackUrl = `${buildAuthCallbackUrl(manage, sandbox)}?${new URLSearchParams({ next }).toString()}`
+  const portal = sandbox ? PORTAL_LOGIN_SANDBOX : PORTAL_LOGIN_PRODUCTION
+  const params = new URLSearchParams({ [LOGIN_RETURN_PARAM]: callbackUrl })
+  return `${portal}/login/authentication_jump/${manage.jumpKey}?${params.toString()}`
+}
+
+/** Open a Manage page in a new tab (never replaces the Voice tab). */
+export function openManagePortal(path: string): void {
+  window.open(buildManagePortalUrl(path), '_blank', 'noopener,noreferrer')
+}
+
 export interface LauncherTile extends AicountlyAppDef {
   isCurrent: boolean
   launchUrl: string
