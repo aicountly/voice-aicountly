@@ -187,7 +187,9 @@ final class LifecycleFiles
         // an error to retry and, in the end, a failed row for ops — never a silent success.
         $root = Env::get('RECORDING_STORAGE_PATH');
         if ($root === '') {
-            throw new \RuntimeException('recordings are held behind RECORDING_STORAGE_URL, not on this server: delete the object at the storage gateway');
+            // The store behind RECORDING_STORAGE_URL is the AICOUNTLY Voice Gateway's (a separate service, not in
+            // this repository); it has no delete API Voice can call (docs/COMPANY_LIFECYCLE.md § Recording files).
+            throw new \RuntimeException('recordings are held behind RECORDING_STORAGE_URL (the Voice Gateway\'s store), not on this server, and the gateway has no delete API: delete the object there by hand (docs/COMPANY_LIFECYCLE.md § Recording files)');
         }
         $rootReal = realpath($root);
         if ($rootReal === false) {
