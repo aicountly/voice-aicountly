@@ -15,8 +15,15 @@ use Aicountly\Lifecycle\Kit;
  *   - enforce():  the write gate. Context::assertAllowed() calls it AFTER the company check (Manage's
  *                 companyinfo for a person, the stream ticket, or the product's company binding), so a
  *                 stranger still gets 403. A company whose Voice subscription lapsed answers 423
- *                 COMPANY_RESTRICTED to every write not in ALLOW; reads always pass. The telephony
- *                 provider's signed webhooks are not gated: they record calls that already happened.
+ *                 COMPANY_RESTRICTED to every write not in ALLOW; reads always pass. Kit 1.1: a product
+ *                 acting with its service key and no person (and the telephony provider's signed
+ *                 webhooks) is a MACHINE caller and goes through checkMachine(): refused the same way
+ *                 unless in MACHINE_ALLOW — the telephony webhook and the gateway's AI action on a live
+ *                 call, which record or act on calls that are happening and cannot be replayed later.
+ *   - legalHold(): kit 1.1 Kit option legal_hold. A recording under legal hold
+ *                 (voice_recordings.legal_hold) HOLDS the company's purge — and the account purge of a
+ *                 person who was the agent on such a call — until the hold is cleared: Manage is acked
+ *                 `held` with the reason, the worker looks again daily, then purges and acks `purged`.
  *   - syncFromCompanyInfo(): Manage's companyinfo is the source of truth (`lifecycle`,
  *                 `restricted_until`), written through wherever this product reads it, so a missed
  *                 event is corrected on the next request.
@@ -43,6 +50,18 @@ final class CompanyLifecycle
         'POST /api/v1/events/ticket',
         // The signed-in agent's own presence.
         'POST /api/v1/agents/presence',
+    ];
+
+    /**
+     * Machine writes (a product's service key with no person, the telephony provider's webhook) that stay
+     * open while the company is read-only (kit 1.1 checkMachine()): ONLY telephony / provider webhooks
+     * that cannot be replayed later. tests/lifecycle.php proves each matches a real route.
+     */
+    public const MACHINE_ALLOW = [
+        // The telephony provider reports what happened on a call (signed per connection).
+        'POST /api/webhooks/telephony/*',
+        // The Voice Gateway runs an AI agent's action step on the call it is holding, mid-call.
+        'POST /api/v1/calls/*/ai-actions',
     ];
 
     private static ?Kit $kit = null;
@@ -74,6 +93,8 @@ final class CompanyLifecycle
         // The stored recordings of purged rows (LifecycleFiles): deleted after the purge commits, retried.
         $options += ['hooks' => LifecycleFiles::hooks()];
         $options += ['log' => [self::class, 'log']];
+        // Kit 1.1: a recording under legal hold stops the purge (ack `held`, looked at again daily).
+        $options += ['legal_hold' => [self::class, 'legalHold']];
 
         return Kit::fromEnv(self::APP_KEY, Db::connect(), self::manifestPath(), $env, [], $options);
     }
@@ -109,22 +130,33 @@ final class CompanyLifecycle
      * company is read-only here. A lifecycle table that cannot be read lets the request through (the
      * kit logs it): a database fault must never read as "your subscription ended".
      */
-    public static function enforce(int $cmpId): void
+    public static function enforce(int $cmpId, bool $machine = false): void
     {
-        $refusal = self::refusal($cmpId, Http::method(), self::requestPath());
+        $refusal = self::refusal($cmpId, Http::method(), self::requestPath(), $machine);
         if ($refusal !== null) {
             Http::json($refusal[0], $refusal[1]);
         }
     }
 
-    /** @return array{0:int, 1:array<string,mixed>}|null */
-    public static function refusal(int $cmpId, string $method, string $path): ?array
+    /** The machine-caller gate (kit 1.1): a product's service key with no person, a provider webhook. */
+    public static function enforceMachine(int $cmpId): void
+    {
+        self::enforce($cmpId, true);
+    }
+
+    /**
+     * @param bool $machine a machine caller (kit 1.1 checkMachine(): MACHINE_ALLOW also stays open)
+     * @return array{0:int, 1:array<string,mixed>}|null
+     */
+    public static function refusal(int $cmpId, string $method, string $path, bool $machine = false): ?array
     {
         if (in_array(strtoupper($method), ['GET', 'HEAD', 'OPTIONS'], true)) {
             return null;
         }
         try {
-            return self::kit()->guard(self::ALLOW)->check($cmpId, $method, $path);
+            $guard = self::kit()->guard(self::ALLOW, self::MACHINE_ALLOW);
+
+            return $machine ? $guard->checkMachine($cmpId, $method, $path) : $guard->check($cmpId, $method, $path);
         } catch (\Throwable $e) {
             self::log('warning', 'write gate skipped for cmp=' . $cmpId . ': ' . $e->getMessage());
 
@@ -179,6 +211,39 @@ final class CompanyLifecycle
         } catch (\Throwable $e) {
             self::log('warning', 'companyinfo lifecycle not recorded for cmp=' . $cmpId . ': ' . $e->getMessage());
         }
+    }
+
+    /**
+     * Kit 1.1 legal hold (the Kit option legal_hold): a reason while a hold exists, else null.
+     *
+     *   company  any recording of the company under legal hold (voice_recordings.legal_hold, not yet
+     *            deleted) — the purge would delete it, its transcript and its call;
+     *   account  any such recording of a call the person took part in as an agent — the hold covers the
+     *            conversation they were party to.
+     *
+     * A hold is set and cleared inside Voice (the retention sweeper already respects it); this only reads
+     * it. A database fault is not a hold: it throws, and the kit retries the attempt.
+     */
+    public static function legalHold(string $scope, int|string $id): ?string
+    {
+        if ($scope === 'company') {
+            $n = (int) Db::scalar('SELECT COUNT(*) FROM voice_recordings WHERE cmp_id = :c AND legal_hold = TRUE AND deleted_at IS NULL', ['c' => (int) $id]);
+
+            return $n > 0
+                ? sprintf('%d call recording(s) of this company are under a legal hold in Voice (voice_recordings.legal_hold); the purge waits until the hold is cleared.', $n)
+                : null;
+        }
+        $n = (int) Db::scalar(
+            'SELECT COUNT(DISTINCT r.recording_id) FROM voice_recordings r
+               JOIN voice_call_participants p ON p.call_id = r.call_id
+               JOIN voice_agents a ON a.agent_id = p.agent_id
+              WHERE a.user_uuid = :u AND r.legal_hold = TRUE AND r.deleted_at IS NULL',
+            ['u' => (string) $id],
+        );
+
+        return $n > 0
+            ? sprintf('%d call recording(s) of calls this person took part in as an agent are under a legal hold in Voice (voice_recordings.legal_hold); the account purge waits until the hold is cleared.', $n)
+            : null;
     }
 
     /** The kit's log lines and this class's, in this product's log. */

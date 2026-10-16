@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Aicountly\Api\Controllers;
 
 use Aicountly\Api\Audit;
+use Aicountly\Api\CompanyLifecycle;
 use Aicountly\Api\Context;
 use Aicountly\Api\Db;
 use Aicountly\Api\Domain\CallStateMachine;
@@ -85,6 +86,10 @@ final class WebhooksController extends Controller
         }
 
         $cmpId = (int) $connection['cmp_id'];
+        // Manage's company lifecycle (kit 1.1): a provider webhook is a machine write. It records a call that
+        // already happened and cannot be replayed later, so it is in CompanyLifecycle::MACHINE_ALLOW and
+        // passes for a read-only company too — routed through the machine gate so that stays a decision.
+        CompanyLifecycle::enforceMachine($cmpId);
         $ctx = Context::forCompany($cmpId, (int) $connection['bo_id']);
         $callId = self::resolveCall($cmpId, $event, $decoded);
 

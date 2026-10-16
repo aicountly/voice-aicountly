@@ -49,9 +49,27 @@ $stillUnknown = 0;
 $abandoned = 0;
 $resent = 0;
 
+$restrictedChecks = [];
 foreach (ExternalOperations::dueForReconcile(50) as $operation) {
     $correlationId = (string) $operation['correlation_id'];
     $targetApp = (string) $operation['target_app'];
+
+    // Kit 1.1 DeferredSend: an attempt the owner refused with 423 COMPANY_RESTRICTED is sent again only
+    // once Manage says the company is active there (asked at most hourly) or restricted_until passed.
+    try {
+        $review = ExternalOperations::reviewRestricted($operation, $restrictedChecks);
+    } catch (\Throwable $e) {
+        error_log('[call-recovery] restricted re-check of operation ' . (int) $operation['operation_id'] . ': ' . $e->getMessage());
+        $review = 'waiting';
+    }
+    if ($review === 'waiting') {
+        $stillUnknown++;
+        continue;
+    }
+    if ($review === 'dropped') {
+        $abandoned++;
+        continue;
+    }
 
     if ($targetApp === 'calendar' || $targetApp === AppointmentsBooking::TARGET) {
         try {

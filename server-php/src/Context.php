@@ -86,7 +86,8 @@ final class Context
         // Manage's company lifecycle: only now that the caller may open the company (a stranger got
         // 403 above), a company whose Voice subscription lapsed answers its writes with 423
         // COMPANY_RESTRICTED — view and export only — for people, stream tickets and products alike.
-        CompanyLifecycle::enforce($this->cmpId);
+        // A product acting with its own key and no person is a machine caller (kit 1.1 checkMachine()).
+        CompanyLifecycle::enforce($this->cmpId, $auth->isService() && !$auth->hasVerifiedActor());
     }
 
     /** The company check itself (assertAllowed() adds the lifecycle write gate after it). */

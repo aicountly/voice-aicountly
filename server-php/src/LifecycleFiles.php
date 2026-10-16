@@ -49,8 +49,10 @@ final class LifecycleFiles
     public static function hooks(): array
     {
         return [
-            'company' => [static fn (int|string $cmpId, array $result): ?string => self::afterPurge('company', (string) $cmpId, $result)],
-            'account' => [static fn (int|string $uuid, array $result): ?string => self::afterPurge('account', (string) $uuid, $result)],
+            // Kit 1.1 passes a HookContext third: these change no row outside the engine (stored objects only,
+            // recorded in their own table), so there is nothing to archiveRows().
+            'company' => [static fn (int|string $cmpId, array $result, ?object $ctx = null): ?string => self::afterPurge('company', (string) $cmpId, $result)],
+            'account' => [static fn (int|string $uuid, array $result, ?object $ctx = null): ?string => self::afterPurge('account', (string) $uuid, $result)],
         ];
     }
 

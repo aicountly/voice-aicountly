@@ -11,6 +11,7 @@ use Aicountly\Api\Db;
 use Aicountly\Api\ExternalOperations;
 use Aicountly\Api\Settings;
 use Aicountly\Api\Support\Clock;
+use Aicountly\Lifecycle\DeferredSend;
 
 /**
  * A callback's diary entry in Aicountly Calendar — a projection Voice keeps
@@ -439,6 +440,18 @@ final class CallbackDiary
 
         if ($status === 0) {
             return $verdict('unknown', 'no_response', 'Calendar did not answer (' . ($said !== '' ? $said : 'no response') . ').');
+        }
+
+        // 423 COMPANY_RESTRICTED (kit 1.1 DeferredSend): the company is read-only in Calendar. Nothing was
+        // written there; deferred, not failed — or dropped when Calendar says the company was purged there.
+        require_once dirname(__DIR__, 2) . '/lib/company-lifecycle/autoload.php';
+        $deferred = DeferredSend::classify($status, $body, Clock::now()->getTimestamp());
+        if ($deferred['action'] === 'defer') {
+            return $verdict('restricted', DeferredSend::DEFERRED_RESTRICTED, $deferred['reason'])
+                + ['restricted_until' => $deferred['restricted_until'], 'next_check_at' => $deferred['next_check_at']];
+        }
+        if ($deferred['action'] === 'drop') {
+            return $verdict('company_deleted', DeferredSend::DROPPED_COMPANY_DELETED, $deferred['reason']);
         }
 
         if ($status === 409) {
@@ -987,6 +1000,36 @@ final class CallbackDiary
                         'calendar_state'  => self::DEFERRED,
                         'calendar_detail' => 'Aicountly Calendar has not accepted Voice’s request yet (' . $verdict['code']
                             . '), so nothing was written there. Voice sends the same request again later; an administrator may need to check the Calendar connection.',
+                    ]);
+                    break;
+
+                case 'restricted':
+                    // Kit 1.1 DeferredSend: deferred_restricted — the attempt is given back, and the same request
+                    // is not sent again until restricted_until passes or Manage says the company is active
+                    // (bin/call-recovery.php asks at most hourly).
+                    ExternalOperations::mark($operationId, ExternalOperations::DEFERRED, [
+                        'http_status'      => $http,
+                        'error_code'       => DeferredSend::DEFERRED_RESTRICTED,
+                        'error_message'    => mb_substr($verdict['detail'], 0, 300),
+                        'restricted_until' => $verdict['restricted_until'] ?? null,
+                        'attempts'         => max(0, (int) $op['attempts'] - 1),
+                        'next_check_at'    => Clock::sql((new \DateTimeImmutable())->setTimestamp((int) ($verdict['next_check_at'] ?? (time() + DeferredSend::RECHECK_SECONDS)))),
+                    ]);
+                    self::save($cmpId, $callbackId, [
+                        'calendar_state'  => self::DEFERRED,
+                        'calendar_detail' => 'The company is read-only in Aicountly Calendar (' . $verdict['detail'] . '), so nothing was written there. Voice sends the same request again once Calendar can be written to.',
+                    ]);
+                    break;
+
+                case 'company_deleted':
+                    // Calendar no longer holds the company (purged there): dropped_company_deleted, never sent
+                    // again, with an audit entry.
+                    ExternalOperations::mark($operationId, ExternalOperations::FAILED, $done($failure(DeferredSend::DROPPED_COMPANY_DELETED, $verdict['detail'])));
+                    \Aicountly\Api\Audit::record($ctx, null, 'callback.calendar_dropped', 'callback', (string) $callbackId,
+                        ['operation_id' => $operationId, 'code' => DeferredSend::DROPPED_COMPANY_DELETED, 'reason' => $verdict['detail']]);
+                    self::save($cmpId, $callbackId, [
+                        'calendar_state'  => self::FAILED,
+                        'calendar_detail' => 'Aicountly Calendar no longer holds this company (' . $verdict['detail'] . '), so the diary entry was not written.',
                     ]);
                     break;
 

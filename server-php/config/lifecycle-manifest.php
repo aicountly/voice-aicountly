@@ -6,7 +6,9 @@ declare(strict_types=1);
  * Voice's reviewed company-lifecycle purge manifest (lib/company-lifecycle, kit README §2 step 4).
  *
  * Drafted by lib/company-lifecycle/bin/discover-manifest.php from a freshly migrated database
- * (migrations 001–015) and reviewed line by line; decisions in docs/COMPANY_LIFECYCLE.md.
+ * (migrations 001–015) and reviewed line by line; decisions in docs/COMPANY_LIFECYCLE.md. Kit 1.1
+ * (migrations 016 + 017): nothing is retained, so no retention period applies; a recording under legal hold
+ * HOLDS the purge (CompanyLifecycle::legalHold(), the Kit option legal_hold) instead of being purged.
  *
  *   company_tables  EVERYTHING company-scoped. Call recordings and transcripts are personal data that no
  *                   statute requires Voice to keep, and nothing kept refers to them; calls, campaigns,
@@ -41,7 +43,8 @@ return [
         ['table' => 'voice_quality_reviews', 'key' => 'cmp_id'],
         // Call and voicemail recordings: personal data with no statute keeping them, and nothing retained here
         // refers to them — deleted, and their stored files after the purge commits (src/LifecycleFiles.php).
-        // A legal hold set inside Voice does not survive the company's own purge (docs/COMPANY_LIFECYCLE.md).
+        // Kit 1.1: while any of the company's recordings is under legal hold the whole purge is HELD (Manage is
+        // acked `held` with the reason, the worker looks again daily) — the hold is never overridden.
         ['table' => 'voice_recordings', 'key' => 'cmp_id'],
         // Voice's own cost estimates for budgets; the billed usage is metered in Manage (AicountlyUsageMeter), not here.
         ['table' => 'voice_usage_entries', 'key' => 'cmp_id'],
