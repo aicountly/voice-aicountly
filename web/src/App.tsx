@@ -33,7 +33,7 @@ const Agents = lazy(() => import('./pages/Workspace').then((module) => ({ defaul
 const Recordings = lazy(() => import('./pages/Workspace').then((module) => ({ default: module.Recordings })))
 const Integrations = lazy(() => import('./pages/Workspace').then((module) => ({ default: module.Integrations })))
 const Settings = lazy(() => import('./pages/Workspace').then((module) => ({ default: module.Settings })))
-const Audit = lazy(() => import('./pages/Workspace').then((module) => ({ default: module.Audit })))
+const Audit = lazy(() => import('./pages/AuditTrail').then((module) => ({ default: module.AuditTrail })))
 const Access = lazy(() => import('./pages/Workspace').then((module) => ({ default: module.Access })))
 const UsersAccess = lazy(() => import('./pages/UsersAccess').then((module) => ({ default: module.UsersAccess })))
 const Reports = lazy(() => import('./pages/Workspace').then((module) => ({ default: module.Reports })))

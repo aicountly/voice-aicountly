@@ -86,6 +86,7 @@ final class Permissions
             'voice.budget.manage'       => 'Set spending limits and capacity',
             'voice.access.manage'       => 'Manage Voice permission profiles',
             'voice.audit.view'          => 'Read the Voice audit trail',
+            'voice.audit.export'        => 'Export the Voice audit trail',
         ],
     ];
 

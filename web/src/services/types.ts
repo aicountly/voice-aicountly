@@ -476,16 +476,32 @@ export interface AccessInfo {
   note: string
 }
 
+export interface AuditChange {
+  field: string
+  label: string
+  old: unknown
+  new: unknown
+}
+
 export interface AuditEvent {
   audit_id: number
   occurred_at: string
   actor_uuid: string | null
+  actor_label: string | null
   actor_kind: string
   actor_app: string | null
   action: string
+  severity: 'info' | 'material' | 'security'
   entity_type: string | null
   entity_id: string | null
+  entity_label: string | null
+  summary: string | null
+  changes: AuditChange[]
+  before: Record<string, unknown>
+  after: Record<string, unknown>
   detail: Record<string, unknown>
+  request_id: string | null
+  user_agent: string | null
 }
 
 export interface Recording {

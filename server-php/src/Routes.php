@@ -6,6 +6,7 @@ namespace Aicountly\Api;
 
 use Aicountly\Api\Controllers\AiActionsController;
 use Aicountly\Api\Controllers\AiAgentsController;
+use Aicountly\Api\Controllers\AuditController;
 use Aicountly\Api\Controllers\CallbacksController;
 use Aicountly\Api\Controllers\CallFlowsController;
 use Aicountly\Api\Controllers\CallsController;
@@ -160,6 +161,10 @@ final class Routes
         $router->get('/v1/suppressions', [WorkspaceController::class, 'suppressions']);
         $router->post('/v1/suppressions', [WorkspaceController::class, 'suppress']);
         $router->get('/v1/audit', [WorkspaceController::class, 'audit']);
+        // The audit trail: filtered list, CSV export, one record's history.
+        $router->get('/v1/audit-log', [AuditController::class, 'index']);
+        $router->get('/v1/audit-log/export', [AuditController::class, 'export']);
+        $router->get('/v1/audit-log/entity/{type}/{id}', [AuditController::class, 'entity']);
         $router->get('/v1/access', [WorkspaceController::class, 'access']);
         $router->post('/v1/access/profiles', [WorkspaceController::class, 'saveProfile']);
         $router->post('/v1/access/assignments', [WorkspaceController::class, 'assignProfile']);

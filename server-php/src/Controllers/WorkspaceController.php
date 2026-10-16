@@ -66,7 +66,7 @@ final class WorkspaceController extends Controller
 
     public static function saveNumber(): never
     {
-        [, $ctx] = self::enter('voice.numbers.manage');
+        [$auth, $ctx] = self::enter('voice.numbers.manage');
         $body = Http::body();
 
         // A business number is read in the country it is declared for.
@@ -94,6 +94,9 @@ final class WorkspaceController extends Controller
         ];
 
         $numberId = isset($body['number_id']) ? (int) $body['number_id'] : 0;
+        $before = $numberId > 0
+            ? Db::first('SELECT * FROM voice_numbers WHERE number_id = :id AND cmp_id = :cmp', ['id' => $numberId, 'cmp' => $ctx->cmpId])
+            : null;
         if ($numberId > 0) {
             $updated = Db::update('voice_numbers', $values, ['number_id' => $numberId, 'cmp_id' => $ctx->cmpId]);
             if ($updated === 0) {
@@ -102,6 +105,7 @@ final class WorkspaceController extends Controller
         } else {
             $numberId = (int) Db::insert('voice_numbers', $values + ['cmp_id' => $ctx->cmpId, 'bo_id' => $ctx->boId], 'number_id');
         }
+        Audit::saved($ctx, $auth, 'number', $numberId, CallingPolicy::mask($e164), $before, $values);
 
         Http::data(['number_id' => $numberId]);
     }
@@ -161,7 +165,7 @@ final class WorkspaceController extends Controller
 
     public static function saveQueue(): never
     {
-        [, $ctx] = self::enter('voice.queues.manage');
+        [$auth, $ctx] = self::enter('voice.queues.manage');
         $body = Http::body();
 
         $name = trim((string) ($body['name'] ?? ''));
@@ -193,6 +197,9 @@ final class WorkspaceController extends Controller
         ];
 
         $queueId = isset($body['queue_id']) ? (int) $body['queue_id'] : 0;
+        $before = $queueId > 0
+            ? Db::first('SELECT * FROM voice_queues WHERE queue_id = :id AND cmp_id = :cmp', ['id' => $queueId, 'cmp' => $ctx->cmpId])
+            : null;
         if ($queueId > 0) {
             if (Db::update('voice_queues', $values, ['queue_id' => $queueId, 'cmp_id' => $ctx->cmpId]) === 0) {
                 Http::notFound('That queue is not in this company.');
@@ -200,6 +207,7 @@ final class WorkspaceController extends Controller
         } else {
             $queueId = (int) Db::insert('voice_queues', $values + ['cmp_id' => $ctx->cmpId, 'bo_id' => $ctx->boId], 'queue_id');
         }
+        Audit::saved($ctx, $auth, 'queue', $queueId, $name, $before, $values);
 
         Http::data(['queue_id' => $queueId]);
     }
@@ -229,7 +237,7 @@ final class WorkspaceController extends Controller
 
     public static function saveAgent(): never
     {
-        [, $ctx] = self::enter('voice.team.manage');
+        [$auth, $ctx] = self::enter('voice.team.manage');
         $body = Http::body();
 
         $userUuid = trim((string) ($body['user_uuid'] ?? ''));
@@ -249,17 +257,31 @@ final class WorkspaceController extends Controller
         ];
 
         $agentId = isset($body['agent_id']) ? (int) $body['agent_id'] : 0;
-        if ($agentId > 0) {
-            if (Db::update('voice_agents', $values, ['agent_id' => $agentId, 'cmp_id' => $ctx->cmpId]) === 0) {
-                Http::notFound('That agent is not in this company.');
+        // The write and its audit row commit together: a voice_role change decides what somebody may do on calls.
+        $agentId = Db::transaction(function () use ($ctx, $auth, $values, $agentId, $userUuid): int {
+            $before = $agentId > 0
+                ? Db::first('SELECT * FROM voice_agents WHERE agent_id = :id AND cmp_id = :cmp', ['id' => $agentId, 'cmp' => $ctx->cmpId])
+                : null;
+            if ($agentId > 0) {
+                if (Db::update('voice_agents', $values, ['agent_id' => $agentId, 'cmp_id' => $ctx->cmpId]) === 0) {
+                    Http::notFound('That agent is not in this company.');
+                }
+            } else {
+                $agentId = (int) Db::insert('voice_agents', $values + [
+                    'cmp_id'    => $ctx->cmpId,
+                    'bo_id'     => $ctx->boId,
+                    'user_uuid' => $userUuid,
+                ], 'agent_id');
             }
-        } else {
-            $agentId = (int) Db::insert('voice_agents', $values + [
-                'cmp_id'    => $ctx->cmpId,
-                'bo_id'     => $ctx->boId,
-                'user_uuid' => $userUuid,
-            ], 'agent_id');
-        }
+            $changedRole = $before !== null && (string) $before['voice_role'] !== $values['voice_role'];
+            Audit::saved(
+                $ctx, $auth, 'agent', $agentId, (string) ($before['user_uuid'] ?? $userUuid), $before, $values,
+                material: true,
+                action: $changedRole ? 'voice.access.agent_role_changed' : '',
+            );
+
+            return $agentId;
+        });
 
         Http::data(['agent_id' => $agentId]);
     }
@@ -297,6 +319,13 @@ final class WorkspaceController extends Controller
         $result = PresenceService::set($ctx, $agentId, (string) ($body['presence'] ?? ''), $body['reason'] ?? null);
         if (!$result['ok']) {
             self::fail($result['code'], $result['message']);
+        }
+        // Your own availability is part of handling calls and is not trailed (it changes all day);
+        // changing a colleague's is, because it is done to somebody else.
+        if ($owner !== $auth->uuid) {
+            Audit::record($ctx, $auth, 'voice.agent.presence_set', 'agent', (string) $agentId, [
+                'agent_user' => $owner, 'presence' => (string) ($body['presence'] ?? ''),
+            ], label: $owner);
         }
 
         Http::data(['presence' => $body['presence'], 'heartbeat_interval_seconds' => PresenceService::HEARTBEAT_SECONDS]);
@@ -373,26 +402,43 @@ final class WorkspaceController extends Controller
             Permissions::assert($ctx, $auth, 'voice.retention.manage');
         }
 
-        $before = Settings::forCompany($ctx->cmpId);
-        $after = Settings::save($ctx, $body, $auth->uuid);
+        // The change and its audit row commit together: if the row cannot be written, the settings do not change.
+        $after = Db::transaction(function () use ($ctx, $auth, $body, $touchesRetention): array {
+            $before = Settings::forCompany($ctx->cmpId);
+            $after = Settings::save($ctx, $body, $auth->uuid);
 
-        $changed = [];
-        foreach ($after as $key => $value) {
-            if (($before[$key] ?? null) !== $value) {
-                $changed[] = $key;
+            $changed = [];
+            foreach ($after as $key => $value) {
+                if (in_array($key, ['updated_at', 'updated_by'], true)) {
+                    continue;
+                }
+                if (self::flatSetting($before[$key] ?? null) !== self::flatSetting($value)) {
+                    $changed[] = $key;
+                }
             }
-        }
+            if ($changed !== []) {
+                Audit::material(
+                    $ctx,
+                    $auth,
+                    $touchesRetention ? Audit::RETENTION_CHANGED : Audit::SETTINGS_CHANGED,
+                    'settings',
+                    (string) $ctx->cmpId,
+                    ['changed' => $changed],
+                    before: array_intersect_key($before, array_flip($changed)),
+                    after: array_intersect_key($after, array_flip($changed)),
+                    label: 'Voice settings',
+                );
+            }
 
-        Audit::record(
-            $ctx,
-            $auth,
-            $touchesRetention ? Audit::RETENTION_CHANGED : Audit::SETTINGS_CHANGED,
-            'settings',
-            (string) $ctx->cmpId,
-            ['changed' => $changed],
-        );
+            return $after;
+        });
 
         Http::data($after);
+    }
+
+    private static function flatSetting(mixed $value): string
+    {
+        return is_scalar($value) || $value === null ? (string) json_encode($value) : (string) json_encode($value, JSON_UNESCAPED_UNICODE);
     }
 
     public static function suppressions(): never
@@ -446,6 +492,9 @@ final class WorkspaceController extends Controller
             (string) ($body['source'] ?? 'manual'),
             $auth->uuid,
         );
+        Audit::record($ctx, $auth, 'voice.suppression.added', 'suppression', null, [
+            'reason' => (string) ($body['reason'] ?? 'opt_out'), 'source' => (string) ($body['source'] ?? 'manual'),
+        ], label: CallingPolicy::mask($e164));
 
         Http::data(['suppressed' => true, 'masked' => CallingPolicy::mask($e164)]);
     }
@@ -582,39 +631,58 @@ final class WorkspaceController extends Controller
         $profileId = isset($body['profile_id']) ? (int) $body['profile_id'] : 0;
         $isActive = !array_key_exists('is_active', $body) || (bool) $body['is_active'];
 
+        $description = trim((string) ($body['description'] ?? ''));
         try {
-            if ($profileId > 0) {
-                $existing = Db::first(
-                    'SELECT * FROM voice_permission_profiles WHERE cmp_id = :cmp AND profile_id = :id',
-                    ['cmp' => $ctx->cmpId, 'id' => $profileId],
-                );
-                if ($existing === null) {
-                    Http::notFound('That profile could not be found.');
-                }
-                // Editing a profile is as good as granting what it now holds to
-                // everybody assigned it, so the same rule applies to what it held.
-                $wasHeld = Db::jsonColumn($existing['permissions'] ?? null);
-                $escalation = array_values(array_diff($wasHeld, $grantable));
-                if ($escalation !== []) {
-                    Http::forbidden('That profile holds permissions you do not (' . implode(', ', $escalation) . '), so you cannot edit it.');
+            // The profile and its audit row commit together; a grant nobody can account for does not happen.
+            $profileId = Db::transaction(function () use ($ctx, $auth, $profileId, $name, $description, $permissions, $isActive, $grantable): int {
+                $existing = null;
+                if ($profileId > 0) {
+                    $existing = Db::first(
+                        'SELECT * FROM voice_permission_profiles WHERE cmp_id = :cmp AND profile_id = :id',
+                        ['cmp' => $ctx->cmpId, 'id' => $profileId],
+                    );
+                    if ($existing === null) {
+                        Http::notFound('That profile could not be found.');
+                    }
+                    // Editing a profile is as good as granting what it now holds to
+                    // everybody assigned it, so the same rule applies to what it held.
+                    $wasHeld = Db::jsonColumn($existing['permissions'] ?? null);
+                    $escalation = array_values(array_diff($wasHeld, $grantable));
+                    if ($escalation !== []) {
+                        Http::forbidden('That profile holds permissions you do not (' . implode(', ', $escalation) . '), so you cannot edit it.');
+                    }
+
+                    Db::update('voice_permission_profiles', [
+                        'name'        => $name,
+                        'description' => $description,
+                        'permissions' => $permissions,
+                        'is_active'   => $isActive,
+                        'updated_at'  => \Aicountly\Api\Support\Clock::sql(\Aicountly\Api\Support\Clock::now()),
+                    ], ['cmp_id' => $ctx->cmpId, 'profile_id' => $profileId]);
+                } else {
+                    $profileId = (int) Db::insert('voice_permission_profiles', [
+                        'cmp_id'      => $ctx->cmpId,
+                        'name'        => $name,
+                        'description' => $description,
+                        'permissions' => $permissions,
+                        'is_active'   => $isActive,
+                    ], 'profile_id');
                 }
 
-                Db::update('voice_permission_profiles', [
-                    'name'        => $name,
-                    'description' => trim((string) ($body['description'] ?? '')),
-                    'permissions' => $permissions,
-                    'is_active'   => $isActive,
-                    'updated_at'  => \Aicountly\Api\Support\Clock::sql(\Aicountly\Api\Support\Clock::now()),
-                ], ['cmp_id' => $ctx->cmpId, 'profile_id' => $profileId]);
-            } else {
-                $profileId = (int) Db::insert('voice_permission_profiles', [
-                    'cmp_id'      => $ctx->cmpId,
-                    'name'        => $name,
-                    'description' => trim((string) ($body['description'] ?? '')),
-                    'permissions' => $permissions,
-                    'is_active'   => $isActive,
-                ], 'profile_id');
-            }
+                $state = ['name' => $name, 'description' => $description, 'permissions' => $permissions, 'is_active' => $isActive];
+                $was = $existing === null ? null : [
+                    'name' => (string) $existing['name'], 'description' => (string) $existing['description'],
+                    'permissions' => Db::jsonColumn($existing['permissions'] ?? null), 'is_active' => (bool) $existing['is_active'],
+                ];
+                Audit::material(
+                    $ctx, $auth, Audit::ACCESS_CHANGED, 'permission_profile', (string) $profileId,
+                    ['change' => 'profile_saved', 'permissions' => $permissions, 'is_active' => $isActive],
+                    before: $was, after: $state, label: $name,
+                    summary: ($existing === null ? 'Permission profile created: ' : 'Permission profile updated: ') . $name,
+                );
+
+                return $profileId;
+            });
         } catch (\PDOException $e) {
             if (str_contains($e->getMessage(), 'uq_voice_permission_profiles_cmp_name')) {
                 Http::conflict('A profile with that name already exists.', ['reason' => 'duplicate_name']);
@@ -622,11 +690,6 @@ final class WorkspaceController extends Controller
             throw $e;
         }
 
-        Audit::record($ctx, $auth, Audit::ACCESS_CHANGED, 'permission_profile', (string) $profileId, [
-            'change'      => 'profile_saved',
-            'permissions' => $permissions,
-            'is_active'   => $isActive,
-        ]);
         Permissions::forget();
 
         Http::data(['profile_id' => $profileId, 'permissions' => $permissions], 201);
@@ -647,7 +710,7 @@ final class WorkspaceController extends Controller
         }
 
         $profile = Db::first(
-            'SELECT profile_id, permissions FROM voice_permission_profiles WHERE cmp_id = :cmp AND profile_id = :id',
+            'SELECT profile_id, name, permissions FROM voice_permission_profiles WHERE cmp_id = :cmp AND profile_id = :id',
             ['cmp' => $ctx->cmpId, 'id' => $profileId],
         );
         if ($profile === null) {
@@ -661,16 +724,22 @@ final class WorkspaceController extends Controller
             Http::forbidden('That profile includes permissions you do not hold (' . implode(', ', $escalation) . '), so you cannot assign it.');
         }
 
-        Db::run(
-            'INSERT INTO voice_permission_assignments (cmp_id, profile_id, user_uuid, created_by)
-             VALUES (:cmp, :profile, :uuid, :actor)
-             ON CONFLICT (cmp_id, profile_id, user_uuid) DO NOTHING',
-            ['cmp' => $ctx->cmpId, 'profile' => $profileId, 'uuid' => $userUuid, 'actor' => $auth->uuid],
-        );
+        Db::transaction(function () use ($ctx, $auth, $profileId, $userUuid, $profile): void {
+            $added = Db::run(
+                'INSERT INTO voice_permission_assignments (cmp_id, profile_id, user_uuid, created_by)
+                 VALUES (:cmp, :profile, :uuid, :actor)
+                 ON CONFLICT (cmp_id, profile_id, user_uuid) DO NOTHING',
+                ['cmp' => $ctx->cmpId, 'profile' => $profileId, 'uuid' => $userUuid, 'actor' => $auth->uuid],
+            )->rowCount();
 
-        Audit::record($ctx, $auth, Audit::ACCESS_CHANGED, 'permission_assignment', $userUuid, [
-            'change' => 'profile_assigned', 'profile_id' => $profileId,
-        ]);
+            Audit::material(
+                $ctx, $auth, Audit::ACCESS_CHANGED, 'permission_assignment', $userUuid,
+                ['change' => 'profile_assigned', 'profile_id' => $profileId, 'already_assigned' => $added === 0],
+                after: ['user' => $userUuid, 'profile' => (string) $profile['name']],
+                label: $userUuid . ' / ' . $profile['name'],
+                summary: 'Profile "' . $profile['name'] . '" assigned to ' . $userUuid,
+            );
+        });
         Permissions::forget();
 
         Http::data(['assigned' => true], 201);
@@ -688,7 +757,7 @@ final class WorkspaceController extends Controller
         }
 
         $profile = Db::first(
-            'SELECT permissions FROM voice_permission_profiles WHERE cmp_id = :cmp AND profile_id = :id',
+            'SELECT name, permissions FROM voice_permission_profiles WHERE cmp_id = :cmp AND profile_id = :id',
             ['cmp' => $ctx->cmpId, 'id' => $profileId],
         );
         if ($profile === null) {
@@ -701,14 +770,20 @@ final class WorkspaceController extends Controller
             Http::forbidden('That profile includes permissions you do not hold, so you cannot revoke it.');
         }
 
-        Db::run(
-            'DELETE FROM voice_permission_assignments WHERE cmp_id = :cmp AND user_uuid = :uuid AND profile_id = :profile',
-            ['cmp' => $ctx->cmpId, 'uuid' => $userUuid, 'profile' => $profileId],
-        );
+        Db::transaction(function () use ($ctx, $auth, $profileId, $userUuid, $profile): void {
+            $removed = Db::run(
+                'DELETE FROM voice_permission_assignments WHERE cmp_id = :cmp AND user_uuid = :uuid AND profile_id = :profile',
+                ['cmp' => $ctx->cmpId, 'uuid' => $userUuid, 'profile' => $profileId],
+            )->rowCount();
 
-        Audit::record($ctx, $auth, Audit::ACCESS_CHANGED, 'permission_assignment', $userUuid, [
-            'change' => 'profile_revoked', 'profile_id' => $profileId,
-        ]);
+            Audit::material(
+                $ctx, $auth, Audit::ACCESS_CHANGED, 'permission_assignment', $userUuid,
+                ['change' => 'profile_revoked', 'profile_id' => $profileId, 'removed' => $removed],
+                before: ['user' => $userUuid, 'profile' => (string) $profile['name']],
+                label: $userUuid . ' / ' . $profile['name'],
+                summary: 'Profile "' . $profile['name'] . '" revoked from ' . $userUuid,
+            );
+        });
         Permissions::forget();
 
         Http::data(['revoked' => true]);

@@ -42,9 +42,11 @@ echo "Voice usage metering\n" . str_repeat('=', 62) . "\n";
 
 function cleanUp(): void
 {
+    // voice_audit_events is append-only (migration 014): it is not cleaned here. tests/run.sh's next integration
+    // run empties it with TRUNCATE, which is the only reset the table allows.
     foreach ([
         'voice_call_events', 'voice_call_participants', 'voice_call_legs', 'voice_usage_entries', 'voice_calls',
-        'voice_agents', 'voice_numbers', 'voice_provider_connections', 'voice_settings', 'voice_audit_events',
+        'voice_agents', 'voice_numbers', 'voice_provider_connections', 'voice_settings',
     ] as $table) {
         Db::run('DELETE FROM ' . $table . ' WHERE cmp_id = :cmp', ['cmp' => CMP]);
     }
