@@ -266,7 +266,9 @@ T::group('5. Read API: permission, scoping, filters, entity history');
 {
     // Another company's rows must never appear.
     $otherCtx = scope(OTHER_CMP, $admin);
-    Audit::record($otherCtx, $admin, 'voice.number.updated', 'number', '1', [], label: 'OTHER COMPANY ROW');
+    // An id no number of CMP can have: lifecycle.php (run before this file) ends with truncateAll(), which
+    // restarts the sequences, so CMP's own number above may well be number 1.
+    Audit::record($otherCtx, $admin, 'voice.number.updated', 'number', '987654321', [], label: 'OTHER COMPANY ROW');
 
     grant(CMP, READER, ['voice.audit.view', 'voice.dashboard.view']);
     grant(CMP, EXPORTER, ['voice.audit.view', 'voice.audit.export']);
@@ -310,7 +312,7 @@ T::group('5. Read API: permission, scoping, filters, entity history');
 
     $entity = request('GET', '/v1/audit-log/entity/number/' . (int) Db::scalar("SELECT entity_id FROM voice_audit_events WHERE action = 'voice.number.created' AND cmp_id = " . CMP), $q);
     T::same(['voice.number.updated', 'voice.number.created'], array_column($entity['body']['data'], 'action'), 'entity history lists one record newest first');
-    T::same(0, count(request('GET', '/v1/audit-log/entity/number/1', $q)['body']['data']), 'entity history is scoped to the company (the other company’s number 1 is not here)');
+    T::same(0, count(request('GET', '/v1/audit-log/entity/number/987654321', $q)['body']['data']), 'entity history is scoped to the company (the other company’s number is not here)');
 }
 
 // ===========================================================================

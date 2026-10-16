@@ -19,6 +19,7 @@
 
 import { getApiBaseUrl } from '../config'
 import { ensureSesKey } from '../auth/portal'
+import { noteRestrictedResponse } from './companyRestriction'
 
 export interface CompanyScope {
   cmp_id: number
@@ -223,6 +224,9 @@ async function send<T>(path: string, options: RequestOptions = {}, isRetry = fal
   }
 
   if (!response.ok) {
+    // 423 COMPANY_RESTRICTED: the company's subscription lapsed and it is read-only (Manage's company
+    // lifecycle). Recorded for the read-only banner, which also raises a toast; the error still throws.
+    noteRestrictedResponse(scope?.cmp_id, response.status, parsed)
     const envelope = (parsed ?? {}) as {
       error?: { code?: string; message?: string; details?: Record<string, unknown> }
       message?: string

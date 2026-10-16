@@ -15,6 +15,26 @@ final class Router
     /** @var list<array{method:string, segments:list<string>, handler:callable}> */
     private array $routes = [];
 
+    /** The route the current request matched, as "POST v1/things/{id}" (the company-lifecycle allow-list is written against it). */
+    private static string $matched = '';
+
+    /** The route pattern the current request matched; '' before dispatch. */
+    public static function matchedRoute(): string
+    {
+        return self::$matched;
+    }
+
+    /**
+     * Every registered route as "METHOD v1/things/{id}" — for the checks that a policy written against
+     * routes (the company-lifecycle allow-list) names routes that exist.
+     *
+     * @return list<string>
+     */
+    public function patterns(): array
+    {
+        return array_map(static fn (array $r): string => $r['method'] . ' ' . implode('/', $r['segments']), $this->routes);
+    }
+
     public function get(string $pattern, callable $handler): self
     {
         return $this->add('GET', $pattern, $handler);
@@ -83,6 +103,7 @@ final class Router
                 continue;
             }
 
+            self::$matched = $method . ' ' . implode('/', $route['segments']);
             ($route['handler'])(...$args);
 
             return true;

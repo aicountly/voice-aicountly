@@ -21,6 +21,8 @@ final class Http
 
     private static ?array $body = null;
 
+    private static ?string $raw = null;
+
     /**
      * Send the response and stop.
      *
@@ -125,13 +127,32 @@ final class Http
         if (self::$body !== null) {
             return self::$body;
         }
-        $raw = (string) file_get_contents('php://input');
+        $raw = self::raw();
         if ($raw === '') {
             return self::$body = [];
         }
         $decoded = json_decode($raw, true);
 
         return self::$body = is_array($decoded) ? $decoded : [];
+    }
+
+    /**
+     * The request body exactly as it arrived, read once. A signature is over THESE bytes (the
+     * company-lifecycle receiver), so it must not be re-encoded from what was decoded.
+     */
+    public static function raw(): string
+    {
+        return self::$raw ??= (string) file_get_contents('php://input');
+    }
+
+    /** Stand in for php://input. CLI only; clears the parsed body too. */
+    public static function setRawForTesting(?string $raw): void
+    {
+        if (PHP_SAPI !== 'cli') {
+            return;
+        }
+        self::$raw = $raw;
+        self::$body = null;
     }
 
     public static function method(): string

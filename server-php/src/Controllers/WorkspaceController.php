@@ -554,6 +554,9 @@ final class WorkspaceController extends Controller
             // this session — not anything the portal session or the browser said.
             'is_owner'  => $ctx->isOwner($auth),
             'owner_source' => 'manage.companyinfo',
+            // Manage's company lifecycle here (active | restricted | purge_pending | purged), for the SPA's
+            // read-only banner: the state this API enforces, written through from companyinfo.
+            'lifecycle' => \Aicountly\Api\CompanyLifecycle::lifecycle($ctx->cmpId),
             'grantable' => $manages ? Permissions::grantable($ctx, $auth) : [],
             'profiles'  => $manages
                 ? array_map(

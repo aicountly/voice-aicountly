@@ -353,11 +353,12 @@ T::group('6. Calendar failure creates no local event');
     // The decisive check: Voice has no table that could hold a mirrored
     // calendar event. voice_call_events and voice_audit_events are excluded by
     // name because they hold telephony events and audit rows, neither of which
-    // is a scheduling record.
+    // is a scheduling record — nor is aic_lifecycle_events, the company-lifecycle kit's record of
+    // Manage's signed lifecycle events (lib/company-lifecycle).
     $tables = Db::all(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public'
             AND (tablename LIKE '%event%' OR tablename LIKE '%appointment%' OR tablename LIKE '%booking%')
-            AND tablename NOT IN ('voice_call_events', 'voice_audit_events')",
+            AND tablename NOT IN ('voice_call_events', 'voice_audit_events', 'aic_lifecycle_events')",
     );
     $names = array_map(static fn (array $r): string => (string) $r['tablename'], $tables);
     T::same([], $names,
@@ -1156,11 +1157,12 @@ T::group('24. No cross-app database access exists');
     }
     T::same([], $offenders, 'no source file reaches into another product’s database');
 
-    // Every table this product owns is prefixed voice_.
+    // Every table this product owns is prefixed voice_ — plus the vendored company-lifecycle kit's own
+    // aic_lifecycle_* bookkeeping (lib/company-lifecycle, migration 014), which is Voice's too.
     $tables = Db::all("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY 1");
     $foreign = array_values(array_filter(
         array_map(static fn (array $r): string => (string) $r['tablename'], $tables),
-        static fn (string $name): bool => !str_starts_with($name, 'voice_'),
+        static fn (string $name): bool => !str_starts_with($name, 'voice_') && !str_starts_with($name, 'aic_lifecycle_'),
     ));
     T::same([], $foreign, 'every table in the schema belongs to Voice');
 

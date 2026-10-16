@@ -50,6 +50,11 @@ final class Routes
         // See WebhooksController.
         $router->post('/webhooks/telephony/{connectionId}', [WebhooksController::class, 'telephony']);
 
+        // Manage's company lifecycle (lib/company-lifecycle): restricted / unrestricted / purge requests.
+        // A machine route: no session, no company scope — the HMAC over the body
+        // (LIFECYCLE_WEBHOOK_SECRET) is its only credential. Purges run in the cron worker.
+        $router->post('/internal/manage/company-lifecycle', [CompanyLifecycle::class, 'receive']);
+
         // -------------------------------------------------------------------
         // The company switcher — the one authenticated route with no company
         // scope, because you cannot name a company in order to list companies.

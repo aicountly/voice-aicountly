@@ -257,6 +257,57 @@ final class ExternalOperations
     }
 
     /**
+     * Kit 1.1 DeferredSend, the hourly re-check of an operation the owner refused with 423
+     * COMPANY_RESTRICTED (status deferred, error_code deferred_restricted): ask Manage's company-status
+     * (at most hourly per company and product — $cache holds this run's answers) and decide.
+     *
+     *   null      resume: the company is active there again, or restricted_until has passed — send the
+     *             same attempt again (the caller goes on to the owner's own recovery);
+     *   'waiting' still read-only there: next_check_at moved to restricted_until or an hour;
+     *   'dropped' Manage reports the company deleted: dropped_company_deleted, with an audit event.
+     *
+     * Anything else (not a deferred_restricted operation) is null: the normal recovery applies.
+     *
+     * @param array<string, mixed> $op
+     * @param array<string, array<string, mixed>> $cache
+     */
+    public static function reviewRestricted(array $op, array &$cache, ?\Aicountly\Lifecycle\DeferredSend $deferredSend = null): ?string
+    {
+        require_once dirname(__DIR__) . '/lib/company-lifecycle/autoload.php';
+        if ((string) $op['status'] !== self::DEFERRED || (string) ($op['error_code'] ?? '') !== \Aicountly\Lifecycle\DeferredSend::DEFERRED_RESTRICTED) {
+            return null;
+        }
+        $cmpId = (int) $op['cmp_id'];
+        $app = (string) $op['target_app'];
+        $until = isset($op['restricted_until']) && $op['restricted_until'] !== null ? (string) $op['restricted_until'] : null;
+        $key = $cmpId . ':' . $app;
+        $cache[$key] ??= ($deferredSend ?? CompanyLifecycle::kit()->deferredSend())->review($cmpId, $app, $until);
+        $decision = $cache[$key];
+        $operationId = (int) $op['operation_id'];
+        if ($decision['action'] === 'drop') {
+            self::mark($operationId, self::FAILED, [
+                'error_code'    => \Aicountly\Lifecycle\DeferredSend::DROPPED_COMPANY_DELETED,
+                'error_message' => mb_substr((string) $decision['reason'], 0, 300),
+                'next_check_at' => null,
+            ]);
+            Audit::record(Context::forCompany($cmpId), null, 'external_operation.dropped', 'external_operation', (string) $operationId,
+                ['target_app' => $app, 'code' => \Aicountly\Lifecycle\DeferredSend::DROPPED_COMPANY_DELETED, 'reason' => $decision['reason']]);
+
+            return 'dropped';
+        }
+        if ($decision['action'] === 'wait') {
+            self::mark($operationId, self::DEFERRED, [
+                'restricted_until' => $decision['restricted_until'],
+                'next_check_at'    => Clock::sql((new \DateTimeImmutable())->setTimestamp((int) $decision['next_check_at'])),
+            ]);
+
+            return 'waiting';
+        }
+
+        return null;
+    }
+
+    /**
      * Operations whose outcome nobody knows yet, and attempts waiting to be
      * sent again, oldest first.
      *

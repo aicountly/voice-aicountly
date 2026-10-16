@@ -97,6 +97,10 @@ php "$ROOT/tests/integration.php"
 # Usage metering: what is reported to Manage's usage meter for each ended call,
 # and that a callback or a hang-up answers the same with metering off or broken.
 php "$ROOT/tests/metering.php"
+# Manage's company lifecycle (lib/company-lifecycle): the reviewed manifest against this schema (strict, company
+# and user scopes), the allow-list, the receiver, the 423 write gate, a signed purge end to end with the stored
+# recordings deleted, and the account purge.
+php "$ROOT/tests/lifecycle.php"
 
 # The audit trail: writer context, diff/secret handling, immutability, fail-closed rows, coverage through the real
 # endpoints, and the read API (filters, scoping, permissions, CSV).
