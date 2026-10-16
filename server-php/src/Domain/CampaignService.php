@@ -541,26 +541,34 @@ final class CampaignService
             }
         }
 
-        // Queue the first attempt per audience member. ON CONFLICT DO NOTHING
-        // makes pressing Start twice harmless.
-        Db::run(
-            'INSERT INTO voice_campaign_attempts (campaign_id, audience_ref_id, cmp_id, attempt_no, status)
-             SELECT campaign_id, audience_ref_id, cmp_id, 1, \'queued\'
-               FROM voice_campaign_audience_refs
-              WHERE campaign_id = :id
-             ON CONFLICT (campaign_id, audience_ref_id, attempt_no) DO NOTHING',
-            ['id' => $campaignId],
-        );
+        // The launch and its audit row commit together: dialling hundreds of people does not start unrecorded.
+        Db::transaction(static function () use ($ctx, $auth, $campaignId, $status): void {
+            // Queue the first attempt per audience member. ON CONFLICT DO NOTHING
+            // makes pressing Start twice harmless.
+            Db::run(
+                'INSERT INTO voice_campaign_attempts (campaign_id, audience_ref_id, cmp_id, attempt_no, status)
+                 SELECT campaign_id, audience_ref_id, cmp_id, 1, \'queued\'
+                   FROM voice_campaign_audience_refs
+                  WHERE campaign_id = :id
+                 ON CONFLICT (campaign_id, audience_ref_id, attempt_no) DO NOTHING',
+                ['id' => $campaignId],
+            );
 
-        Db::update('voice_campaigns', [
-            'status'     => 'running',
-            'started_at' => Clock::sql(Clock::now()),
-            'paused_at'  => null,
-            'status_reason' => null,
-            'updated_at' => Clock::sql(Clock::now()),
-        ], ['campaign_id' => $campaignId, 'cmp_id' => $ctx->cmpId]);
+            Db::update('voice_campaigns', [
+                'status'     => 'running',
+                'started_at' => Clock::sql(Clock::now()),
+                'paused_at'  => null,
+                'status_reason' => null,
+                'updated_at' => Clock::sql(Clock::now()),
+            ], ['campaign_id' => $campaignId, 'cmp_id' => $ctx->cmpId]);
 
-        Audit::record($ctx, $auth, Audit::CAMPAIGN_LAUNCHED, 'campaign', (string) $campaignId);
+            $queued = (int) (Db::scalar(
+                'SELECT COUNT(*) FROM voice_campaign_attempts WHERE campaign_id = :id AND status = \'queued\'',
+                ['id' => $campaignId],
+            ) ?? 0);
+            Audit::material($ctx, $auth, Audit::CAMPAIGN_LAUNCHED, 'campaign', (string) $campaignId, ['queued_attempts' => $queued],
+                before: ['status' => $status], after: ['status' => 'running'], label: self::nameOf($ctx, $campaignId));
+        });
 
         return ['ok' => true, 'code' => null, 'message' => null, 'status' => 'running'];
     }
@@ -571,19 +579,24 @@ final class CampaignService
             return ['ok' => false, 'code' => 'illegal_transition', 'message' => 'Only a running campaign can be paused.', 'status' => $status];
         }
 
-        Db::update('voice_campaigns', [
-            'status'    => 'paused',
-            'paused_at' => Clock::sql(Clock::now()),
-            'updated_at' => Clock::sql(Clock::now()),
-        ], ['campaign_id' => $campaignId, 'cmp_id' => $ctx->cmpId]);
+        $inFlight = Db::transaction(static function () use ($ctx, $auth, $campaignId, $status): int {
+            Db::update('voice_campaigns', [
+                'status'    => 'paused',
+                'paused_at' => Clock::sql(Clock::now()),
+                'updated_at' => Clock::sql(Clock::now()),
+            ], ['campaign_id' => $campaignId, 'cmp_id' => $ctx->cmpId]);
 
-        $inFlight = (int) (Db::scalar(
-            'SELECT COUNT(*) FROM voice_campaign_attempts
-              WHERE campaign_id = :id AND status IN (\'dispatching\', \'dialling\', \'connected\')',
-            ['id' => $campaignId],
-        ) ?? 0);
+            $inFlight = (int) (Db::scalar(
+                'SELECT COUNT(*) FROM voice_campaign_attempts
+                  WHERE campaign_id = :id AND status IN (\'dispatching\', \'dialling\', \'connected\')',
+                ['id' => $campaignId],
+            ) ?? 0);
 
-        Audit::record($ctx, $auth, Audit::CAMPAIGN_PAUSED, 'campaign', (string) $campaignId, ['in_flight' => $inFlight]);
+            Audit::material($ctx, $auth, Audit::CAMPAIGN_PAUSED, 'campaign', (string) $campaignId, ['in_flight' => $inFlight],
+                before: ['status' => $status], after: ['status' => 'paused'], label: self::nameOf($ctx, $campaignId));
+
+            return $inFlight;
+        });
 
         return [
             'ok'      => true,
@@ -617,12 +630,17 @@ final class CampaignService
             }
         }
 
-        Db::update('voice_campaigns', [
-            'status'    => 'running',
-            'status_reason' => null,
-            'paused_at' => null,
-            'updated_at' => Clock::sql(Clock::now()),
-        ], ['campaign_id' => $campaignId, 'cmp_id' => $ctx->cmpId]);
+        Db::transaction(static function () use ($ctx, $auth, $campaignId, $status): void {
+            Db::update('voice_campaigns', [
+                'status'    => 'running',
+                'status_reason' => null,
+                'paused_at' => null,
+                'updated_at' => Clock::sql(Clock::now()),
+            ], ['campaign_id' => $campaignId, 'cmp_id' => $ctx->cmpId]);
+
+            Audit::material($ctx, $auth, 'voice.campaign.resumed', 'campaign', (string) $campaignId, [],
+                before: ['status' => $status], after: ['status' => 'running'], label: self::nameOf($ctx, $campaignId));
+        });
 
         return ['ok' => true, 'code' => null, 'message' => 'Resumed.', 'status' => 'running'];
     }
@@ -633,7 +651,7 @@ final class CampaignService
             return ['ok' => false, 'code' => 'illegal_transition', 'message' => 'That campaign has already finished.', 'status' => $status];
         }
 
-        Db::transaction(static function () use ($ctx, $campaignId): void {
+        Db::transaction(static function () use ($ctx, $auth, $campaignId, $status): void {
             Db::update('voice_campaigns', [
                 'status'       => 'cancelled',
                 'completed_at' => Clock::sql(Clock::now()),
@@ -646,9 +664,10 @@ final class CampaignService
                   WHERE campaign_id = :id AND status = \'queued\'',
                 ['id' => $campaignId],
             );
-        });
 
-        Audit::record($ctx, $auth, Audit::CAMPAIGN_CANCELLED, 'campaign', (string) $campaignId);
+            Audit::material($ctx, $auth, Audit::CAMPAIGN_CANCELLED, 'campaign', (string) $campaignId, [],
+                before: ['status' => $status], after: ['status' => 'cancelled'], label: self::nameOf($ctx, $campaignId));
+        });
 
         return ['ok' => true, 'code' => null, 'message' => 'Cancelled. Queued calls will not be placed.', 'status' => 'cancelled'];
     }
@@ -680,7 +699,16 @@ final class CampaignService
               WHERE campaign_id = :id AND cmp_id = :cmp AND status = 'running'",
             ['reason' => $reason . ': ' . $message, 'id' => $campaignId, 'cmp' => $ctx->cmpId],
         );
-        Audit::record($ctx, null, Audit::CAMPAIGN_PAUSED, 'campaign', (string) $campaignId, ['reason' => $reason, 'by' => 'worker']);
+        Audit::record($ctx, null, Audit::CAMPAIGN_PAUSED, 'campaign', (string) $campaignId, ['reason' => $reason, 'by' => 'worker'],
+            label: self::nameOf($ctx, $campaignId), actor: 'system:campaign-worker');
+    }
+
+    private static function nameOf(Context $ctx, int $campaignId): string
+    {
+        return (string) (Db::scalar(
+            'SELECT name FROM voice_campaigns WHERE campaign_id = :id AND cmp_id = :cmp',
+            ['id' => $campaignId, 'cmp' => $ctx->cmpId],
+        ) ?? '');
     }
 
     /** @param array<string, bool> $capabilities @return array{ok: bool, message: ?string} */

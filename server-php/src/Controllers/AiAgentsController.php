@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Aicountly\Api\Controllers;
 
 use Aicountly\Api\Ai\AiClient;
+use Aicountly\Api\Audit;
 use Aicountly\Api\Db;
 use Aicountly\Api\Domain\AiActions;
 use Aicountly\Api\Domain\AiAgentService;
@@ -101,6 +102,7 @@ final class AiAgentsController extends Controller
         // A first draft version, so the agent has something to validate against
         // rather than existing as a name with no configuration.
         AiAgentService::saveDraft($ctx, $auth, $agentId, $body);
+        Audit::record($ctx, $auth, 'voice.ai_agent.created', 'ai_agent', (string) $agentId, [], label: $name);
 
         Http::json(201, ['data' => self::present(AiAgentService::row($ctx, $agentId) ?? [])]);
     }

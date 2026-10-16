@@ -7,6 +7,7 @@
  * quietly absent.
  */
 
+import { EntityHistory } from './AuditTrail'
 import { useVoice } from '../context/VoiceContext'
 import { useApi } from '../hooks/useApi'
 import { api } from '../services/api'
@@ -174,6 +175,7 @@ export function CallDrawer({ callId, onClose }: { callId: number; onClose: () =>
                   ))}
                 </section>
               ) : null}
+              <EntityHistory entityType="call" entityId={callId} />
             </div>
           )
         }}

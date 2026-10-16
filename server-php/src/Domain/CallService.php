@@ -259,6 +259,7 @@ final class CallService
             // call's seconds go to Manage's usage meter from this point instead.
             if ($ended['applied']) {
                 VoiceMeter::recordCall($ctx->cmpId, $callId);
+                Audit::record($ctx, $auth, 'voice.call.ended', 'call', (string) $callId, ['by' => 'agent'], label: 'Call #' . $callId);
             }
         }
 
@@ -315,11 +316,22 @@ final class CallService
             return ['ok' => false, 'code' => 'note_required', 'message' => 'This outcome needs a note.'];
         }
 
+        $previous = $call['disposition_id'] === null ? null : Db::scalar(
+            'SELECT code FROM voice_dispositions WHERE disposition_id = :id',
+            ['id' => (int) $call['disposition_id']],
+        );
         Db::update('voice_calls', [
             'disposition_id'   => (int) $disposition['disposition_id'],
             'disposition_note' => $note,
             'updated_at'       => Clock::sql(Clock::now()),
         ], ['call_id' => $callId, 'cmp_id' => $ctx->cmpId]);
+
+        Audit::record(
+            $ctx, $auth, 'voice.call.disposition_set', 'call', (string) $callId, [],
+            before: ['disposition' => $previous === null ? null : (string) $previous, 'disposition_note' => (string) ($call['disposition_note'] ?? '')],
+            after: ['disposition' => $code, 'disposition_note' => $note],
+            label: 'Call #' . $callId,
+        );
 
         // "Asked not to be called" is not just a label on one call — it is an
         // instruction about every future one, so it goes to the suppression

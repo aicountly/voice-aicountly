@@ -128,25 +128,45 @@ final class NetworkController extends Controller
             $values['credentials_enc'] = $sealed;
         }
 
-        if ($connectionId > 0) {
-            if (ProviderRegistry::connectionRow($ctx, $connectionId) === null) {
-                Http::notFound('That connection is not in this company.');
+        // The connection and its audit row commit together. The trail says THAT credentials were replaced; the
+        // sealed blob (credentials_enc) is a secret field and never reaches it.
+        $connectionId = Db::transaction(static function () use ($ctx, $auth, $values, $connectionId, $provider, $label, $sealed): int {
+            $before = null;
+            if ($connectionId > 0) {
+                $before = ProviderRegistry::connectionRow($ctx, $connectionId);
+                if ($before === null) {
+                    Http::notFound('That connection is not in this company.');
+                }
+                Db::update('voice_provider_connections', $values, ['connection_id' => $connectionId, 'cmp_id' => $ctx->cmpId]);
+            } else {
+                $connectionId = (int) Db::insert('voice_provider_connections', $values + [
+                    'cmp_id'     => $ctx->cmpId,
+                    'bo_id'      => $ctx->boId,
+                    'created_by' => $auth->uuid,
+                ], 'connection_id');
             }
-            Db::update('voice_provider_connections', $values, ['connection_id' => $connectionId, 'cmp_id' => $ctx->cmpId]);
-        } else {
-            $connectionId = (int) Db::insert('voice_provider_connections', $values + [
-                'cmp_id'     => $ctx->cmpId,
-                'bo_id'      => $ctx->boId,
-                'created_by' => $auth->uuid,
-            ], 'connection_id');
-        }
+
+            $fields = array_diff_key($values, ['updated_at' => 1, 'credentials_enc' => 1]);
+            $was = null;
+            if ($before !== null) {
+                $was = [];
+                foreach (array_keys($fields) as $field) {
+                    $value = $before[$field] ?? null;
+                    $was[$field] = is_string($value) && $value !== '' && ($value[0] === '{' || $value[0] === '[')
+                        ? (json_decode($value, true) ?? $value) : $value;
+                }
+            }
+            Audit::material(
+                $ctx, $auth, Audit::PROVIDER_CONFIGURED, 'connection', (string) $connectionId,
+                ['provider' => $provider, 'credentials_changed' => $sealed !== null],
+                before: $was, after: $fields, label: $label,
+                summary: 'Provider connection ' . $label . ($before === null ? ' created' : ' updated') . ($sealed !== null ? ' (credentials replaced)' : ''),
+            );
+
+            return $connectionId;
+        });
 
         ProviderRegistry::resetForTesting();
-
-        Audit::record($ctx, $auth, Audit::PROVIDER_CONFIGURED, 'connection', (string) $connectionId, [
-            'provider' => $provider,
-            'credentials_changed' => $sealed !== null,
-        ]);
 
         $row = ProviderRegistry::connectionRow($ctx, $connectionId);
         $adapter = $row === null ? null : ProviderRegistry::build($row);

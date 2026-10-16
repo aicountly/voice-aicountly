@@ -275,6 +275,54 @@ export const api = {
 }
 
 /**
+ * Fetch a file (the audit trail's CSV) with the session in the Authorization header.
+ *
+ * A link cannot carry the session — it must never travel in a URL — so the file is fetched and
+ * handed to the browser as a blob. `truncated` is the server's X-Export-Truncated flag.
+ */
+export async function downloadFile(
+  path: string,
+  params?: QueryParams,
+): Promise<{ blob: Blob; filename: string; truncated: boolean }> {
+  let sesKey: string
+  try {
+    sesKey = await ensureSesKey()
+  } catch (err) {
+    throw new ApiError(401, 'unauthorized', err instanceof Error ? err.message : 'Sign in again to continue.')
+  }
+
+  let response: Response
+  try {
+    response = await fetch(buildUrl(path, params, true), {
+      headers: { Accept: 'text/csv', Authorization: `Bearer ${sesKey}` },
+    })
+  } catch {
+    throw new ApiError(0, 'network_error', 'Could not reach the Voice service. Check your connection.')
+  }
+
+  if (!response.ok) {
+    let message = `Request failed (${response.status}).`
+    let code = 'error'
+    try {
+      const parsed = (await response.json()) as { error?: { code?: string; message?: string } }
+      message = parsed.error?.message ?? message
+      code = parsed.error?.code ?? code
+    } catch {
+      // not JSON; keep the generic message
+    }
+    throw new ApiError(response.status, code, message)
+  }
+
+  const disposition = response.headers.get('Content-Disposition') ?? ''
+  const match = /filename="([^"]+)"/.exec(disposition)
+  return {
+    blob: await response.blob(),
+    filename: match?.[1] ?? 'voice-audit-trail.csv',
+    truncated: response.headers.get('X-Export-Truncated') === 'true',
+  }
+}
+
+/**
  * The SSE endpoint URL, with a single-use 30-second ticket on it.
  *
  * EventSource cannot set headers, and the session key must never travel in a

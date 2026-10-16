@@ -139,6 +139,10 @@ final class CampaignsController extends Controller
             'budget_minor'     => max(0, (int) ($body['budget_minor'] ?? 0)),
             'created_by'       => $auth->uuid,
         ], 'campaign_id');
+        Audit::record($ctx, $auth, 'voice.campaign.created', 'campaign', (string) $campaignId, [
+            'mode' => $mode, 'max_concurrent' => max(1, min(50, (int) ($body['max_concurrent'] ?? 1))),
+            'budget_minor' => max(0, (int) ($body['budget_minor'] ?? 0)),
+        ], label: $name);
 
         $responseBody = ['data' => self::present(CampaignService::row($ctx, $campaignId) ?? [])];
         Idempotency::remember($ctx, 'campaign.create', $key, 201, $responseBody);
@@ -156,7 +160,8 @@ final class CampaignsController extends Controller
         [$auth, $ctx] = self::enter('voice.campaigns.manage');
         $campaignId = self::id($id);
 
-        if (CampaignService::row($ctx, $campaignId) === null) {
+        $campaignRow = CampaignService::row($ctx, $campaignId);
+        if ($campaignRow === null) {
             Http::notFound('That campaign is not in this company.');
         }
 
@@ -253,6 +258,11 @@ final class CampaignsController extends Controller
             $directoryAccess = \Aicountly\Api\Domain\ContactsDelegation::issueForCampaign($ctx, $auth, $campaignId, true);
         }
 
+        // References are counted, never listed: the audience is Contacts' and CRM's data, not this trail's.
+        Audit::record($ctx, $auth, 'voice.campaign.audience_set', 'campaign', (string) $campaignId, [
+            'source' => $source, 'size' => $inserted,
+        ], label: (string) ($campaignRow['name'] ?? ''));
+
         // The readiness state is now stale; recompute it.
         $validation = CampaignService::validate($ctx, $campaignId);
 
@@ -294,13 +304,18 @@ final class CampaignsController extends Controller
             if (CampaignService::row($ctx, $campaignId) === null) {
                 Http::notFound('That campaign is not in this company.');
             }
-            Db::update('voice_campaigns', [
-                'approved_at' => Clock::sql(Clock::now()),
-                'approved_by' => $auth->uuid,
-                'updated_at'  => Clock::sql(Clock::now()),
-            ], ['campaign_id' => $campaignId, 'cmp_id' => $ctx->cmpId]);
+            $campaign = CampaignService::row($ctx, $campaignId);
+            Db::transaction(static function () use ($ctx, $auth, $campaignId, $campaign): void {
+                Db::update('voice_campaigns', [
+                    'approved_at' => Clock::sql(Clock::now()),
+                    'approved_by' => $auth->uuid,
+                    'updated_at'  => Clock::sql(Clock::now()),
+                ], ['campaign_id' => $campaignId, 'cmp_id' => $ctx->cmpId]);
 
-            Audit::record($ctx, $auth, 'voice.campaign.approved', 'campaign', (string) $campaignId);
+                Audit::material($ctx, $auth, 'voice.campaign.approved', 'campaign', (string) $campaignId, [],
+                    before: ['approved_by' => $campaign['approved_by'] ?? null], after: ['approved_by' => $auth->uuid],
+                    label: (string) ($campaign['name'] ?? ''));
+            });
 
             Http::data(CampaignService::validate($ctx, $campaignId) + ['status' => 'approved']);
         }

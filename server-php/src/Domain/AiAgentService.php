@@ -132,6 +132,30 @@ final class AiAgentService
             ], ['ai_agent_id' => $agentId, 'cmp_id' => $ctx->cmpId]);
         }
 
+        // What the draft says is not trailed (a persona and a knowledge base are content); which sections moved
+        // is, and the actions the agent may take on a call are, because those decide what it can do to a caller.
+        $sections = [];
+        foreach (['persona' => $persona, 'voice_config' => $voiceConfig, 'knowledge' => $knowledge, 'guardrails' => $guardrails] as $section => $value) {
+            $was = $base === null ? [] : Db::jsonColumn($base[$section] ?? null);
+            if (json_encode($was) !== json_encode($value)) {
+                $sections[] = $section;
+            }
+        }
+        $baseState = $base === null ? null : [
+            'languages' => Db::jsonColumn($base['languages'] ?? null),
+            'action_permissions' => Db::jsonColumn($base['action_permissions'] ?? null),
+            'flow_id' => $base['flow_id'] === null ? null : (int) $base['flow_id'],
+        ];
+        $newState = ['languages' => $languages, 'action_permissions' => $permissions, 'flow_id' => $flowId];
+        if ($baseState === null || $sections !== [] || Audit::changes($baseState, $newState) !== []) {
+            Audit::record(
+                $ctx, $auth, 'voice.ai.draft_saved', 'ai_agent', (string) $agentId,
+                ['version_no' => $reuseDraft ? (int) ($base['version_no'] ?? 0) : ($nextNo ?? 1), 'sections_changed' => $sections],
+                before: $baseState, after: $newState, label: (string) ($input['name'] ?? $agent['name']),
+                labels: ['action_permissions' => 'Actions the agent may take', 'flow_id' => 'Call flow'],
+            );
+        }
+
         return [
             'ok'      => true,
             'code'    => null,
@@ -185,7 +209,7 @@ final class AiAgentService
             ];
         }
 
-        Db::transaction(static function () use ($ctx, $agentId, $version, $auth, $validation): void {
+        Db::transaction(static function () use ($ctx, $agentId, $version, $auth, $validation, $agent): void {
             Db::update('voice_ai_agent_versions', [
                 'status'       => 'published',
                 'validation'   => $validation,
@@ -201,11 +225,13 @@ final class AiAgentService
                 'draft_version_id'     => null,
                 'updated_at'           => Clock::sql(Clock::now()),
             ], ['ai_agent_id' => $agentId, 'cmp_id' => $ctx->cmpId]);
-        });
 
-        Audit::record($ctx, $auth, Audit::AI_PUBLISHED, 'ai_agent', (string) $agentId, [
-            'version_no' => (int) $version['version_no'],
-        ]);
+            // Going live changes what callers hear: the audit row commits with it or the publish does not happen.
+            Audit::material($ctx, $auth, Audit::AI_PUBLISHED, 'ai_agent', (string) $agentId, [
+                'version_no' => (int) $version['version_no'],
+            ], before: ['status' => (string) $agent['status']], after: ['status' => 'published', 'version' => (int) $version['version_no']],
+                label: (string) $agent['name']);
+        });
 
         return ['ok' => true, 'code' => null, 'message' => null, 'validation' => $validation];
     }
@@ -228,15 +254,19 @@ final class AiAgentService
             return ['ok' => false, 'code' => 'not_published', 'message' => 'Only a previously published version can be restored.'];
         }
 
-        Db::update('voice_ai_agents', [
-            'published_version_id' => $versionId,
-            'status'               => 'published',
-            'updated_at'           => Clock::sql(Clock::now()),
-        ], ['ai_agent_id' => $agentId, 'cmp_id' => $ctx->cmpId]);
+        $agent = self::row($ctx, $agentId);
+        Db::transaction(static function () use ($ctx, $auth, $agentId, $versionId, $version, $agent): void {
+            Db::update('voice_ai_agents', [
+                'published_version_id' => $versionId,
+                'status'               => 'published',
+                'updated_at'           => Clock::sql(Clock::now()),
+            ], ['ai_agent_id' => $agentId, 'cmp_id' => $ctx->cmpId]);
 
-        Audit::record($ctx, $auth, Audit::AI_ROLLED_BACK, 'ai_agent', (string) $agentId, [
-            'version_no' => (int) $version['version_no'],
-        ]);
+            Audit::material($ctx, $auth, Audit::AI_ROLLED_BACK, 'ai_agent', (string) $agentId, [
+                'version_no' => (int) $version['version_no'],
+            ], before: ['live_version_id' => $agent['published_version_id'] ?? null], after: ['live_version_id' => $versionId, 'version' => (int) $version['version_no']],
+                label: (string) ($agent['name'] ?? ''));
+        });
 
         return [
             'ok' => true, 'code' => null,
