@@ -1,28 +1,27 @@
 /**
  * The remaining management screens.
  *
- * Numbers, queues, agents, recordings, voicemail, reports, integrations,
- * settings and the audit trail. They share their shape entirely — one list from
- * one endpoint, gated by one permission — so they live together rather than in
- * nine near-identical files.
+ * Numbers, queues, agents, recordings, voicemail, reports, integrations and
+ * settings (the audit trail has its own file, AuditTrail.tsx). They share their
+ * shape entirely — one list from one endpoint, gated by one permission — so they
+ * live together rather than in near-identical files.
  */
 
 import { useCallback, useState } from 'react'
 import {
-  AlertTriangle, CheckCircle2, Hash, Headphones, ShieldCheck, TestTube2,
+  AlertTriangle, CheckCircle2, Hash, Headphones, TestTube2,
 } from 'lucide-react'
 
 import { useVoice } from '../context/VoiceContext'
 import { useApi, useMutation } from '../hooks/useApi'
-import { useUrlState } from '../hooks/useUrlState'
 import { api } from '../services/api'
 import type {
-  AccessInfo, AgentSummary, AuditEvent, IntegrationStatus, ListResponse, Recording,
+  AccessInfo, AgentSummary, IntegrationStatus, ListResponse, Recording,
   VoiceNumber, VoiceSettings,
 } from '../services/types'
 import { PageHeader } from '../shell/AppShell'
 import {
-  Badge, Button, Card, EmptyState, Field, Notice, PanelState, Row, Select,
+  Button, Card, EmptyState, Field, Notice, PanelState, Row, Select,
   StatusPill, formatDateTime, formatDuration, timeAgo,
 } from '../ui'
 
@@ -707,75 +706,6 @@ export function Access() {
           )
         }}
       </PanelState>
-    </>
-  )
-}
-
-/* -------------------------------------------------------------------- audit */
-
-export function Audit() {
-  const { company, branchId, timezone } = useVoice()
-  const [filters, setFilters] = useUrlState({ action: '' })
-
-  const state = useApi<ListResponse<AuditEvent>>(
-    (signal) => api.get('v1/audit', { action: filters.action, limit: 100 }, signal),
-    [company?.cmp_id, branchId, filters.action],
-  )
-
-  return (
-    <>
-      <PageHeader
-        title="Audit"
-        subtitle="Who did what, and when. Recording access, campaign launches, provider changes and retention edits."
-      />
-
-      <Card>
-        <Select
-          label="Action"
-          value={filters.action}
-          onChange={(action) => setFilters({ action })}
-          options={[
-            { value: '', label: 'All actions' },
-            { value: 'voice.recording.played', label: 'Recording played' },
-            { value: 'voice.recording.downloaded', label: 'Recording downloaded' },
-            { value: 'voice.transcript.viewed', label: 'Transcript read' },
-            { value: 'voice.call.monitored', label: 'Call monitored' },
-            { value: 'voice.campaign.launched', label: 'Campaign launched' },
-            { value: 'voice.provider.configured', label: 'Provider configured' },
-            { value: 'voice.retention.changed', label: 'Retention changed' },
-          ]}
-        />
-      </Card>
-
-      <div style={{ marginTop: 20 }}>
-        <Card>
-          <PanelState
-            state={state}
-            what="the audit trail"
-            isEmpty={(data) => data.data.length === 0}
-            empty={<EmptyState title="Nothing recorded yet" icon={ShieldCheck} />}
-          >
-            {(data) =>
-              data.data.map((event) => (
-                <Row
-                  key={event.audit_id}
-                  title={event.action.replace(/^voice\./, '').replace(/\./g, ' ')}
-                  detail={
-                    <>
-                      {formatDateTime(event.occurred_at, timezone)} ·{' '}
-                      {event.actor_kind === 'provider'
-                        ? 'telephony provider'
-                        : event.actor_uuid ?? 'system'}
-                      {event.entity_type ? ` · ${event.entity_type} ${event.entity_id ?? ''}` : ''}
-                    </>
-                  }
-                  trailing={<Badge tone="neutral">{event.actor_kind}</Badge>}
-                />
-              ))
-            }
-          </PanelState>
-        </Card>
-      </div>
     </>
   )
 }

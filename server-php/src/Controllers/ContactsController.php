@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Aicountly\Api\Controllers;
 
+use Aicountly\Api\Audit;
 use Aicountly\Api\Clients\ContactsClient;
 use Aicountly\Api\Context;
 use Aicountly\Api\Db;
@@ -164,6 +165,12 @@ final class ContactsController extends Controller
         // Nothing is written locally as a fallback. There is nowhere to write
         // it, and a Voice-side contact would be a second master.
         self::answerFailure($result, 'The contact could not be created in Aicountly Contacts, so it has not been created anywhere.');
+
+        // A write into another product, trailed here as well as there. The name and number stay in Contacts.
+        $created = (bool) ($result['meta']['created'] ?? true);
+        Audit::record($ctx, $auth, Audit::EXTERNAL_WRITE, 'contact', null, [
+            'target' => 'contacts', 'operation' => 'create_contact', 'created' => $created,
+        ], label: $phone !== null ? CallingPolicy::mask($phone) : '', summary: $created ? 'Contact created in Aicountly Contacts' : 'Existing contact matched in Aicountly Contacts');
 
         Http::json(($result['meta']['created'] ?? true) ? 201 : 200, [
             'data' => $result['data'],

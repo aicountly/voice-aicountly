@@ -78,7 +78,8 @@ final class RecordingService
             ];
         }
 
-        Audit::record(
+        // Fail-closed: if the access cannot be recorded, the signed URL is not handed out.
+        Audit::material(
             $ctx,
             $auth,
             $download ? Audit::RECORDING_DOWNLOADED : Audit::RECORDING_PLAYED,
@@ -86,6 +87,7 @@ final class RecordingService
             $recordingUuid,
             // The recording's identity and duration. Never the URL.
             ['call_id' => (int) $row['call_id'], 'duration_seconds' => (int) $row['duration_seconds']],
+            label: 'Recording of call #' . (int) $row['call_id'],
         );
 
         return [

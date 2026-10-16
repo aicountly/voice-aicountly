@@ -286,6 +286,9 @@ final class IntelligenceController extends Controller
             'engine'     => 'human',
             'created_by' => $auth->uuid,
         ], 'summary_id');
+        // That the summary was corrected, and which version; never its text.
+        Audit::record($ctx, $auth, 'voice.summary.edited', 'call', (string) $callId, ['version_no' => $nextNo, 'summary_id' => $summaryId],
+            label: 'Call #' . $callId, summary: 'Call #' . $callId . ': summary edited (version ' . $nextNo . ')');
 
         Http::data(self::presentSummary(Db::first(
             'SELECT * FROM voice_call_summaries WHERE summary_id = :id',
@@ -298,6 +301,11 @@ final class IntelligenceController extends Controller
         [$auth, $ctx] = self::enter('voice.commitments.confirm');
 
         $result = CommitmentService::confirm($ctx, $auth, self::id($id), Http::body());
+
+        if ($result['ok'] || ($result['commitment'] ?? null) !== null) {
+            Audit::record($ctx, $auth, 'voice.commitment.confirmed', 'commitment', $id, ['crm_task_created' => (bool) $result['ok']],
+                label: 'Commitment #' . $id);
+        }
 
         // Not an error: the commitment IS confirmed here. What is unresolved is
         // whether CRM created the task, and that is reported as its own state.
@@ -318,6 +326,8 @@ final class IntelligenceController extends Controller
         if (!$result['ok']) {
             self::fail($result['code'], $result['message']);
         }
+
+        Audit::record($ctx, $auth, 'voice.commitment.rejected', 'commitment', $id, [], label: 'Commitment #' . $id);
 
         Http::data(['rejected' => true]);
     }
@@ -363,6 +373,13 @@ final class IntelligenceController extends Controller
                 'override' => $override === '' ? null : $override,
             ],
         );
+
+        // The verdict and whether a note / override was given; the words of either are not trailed.
+        Audit::record($ctx, $auth, 'voice.call.reviewed', 'call_review', (string) $callId, [
+            'rubric' => (string) ($body['rubric_key'] ?? 'default'), 'verdict' => $verdict,
+            'score' => isset($body['score']) ? (float) $body['score'] : null,
+            'note_given' => trim((string) ($body['note'] ?? '')) !== '', 'override_given' => $override !== '',
+        ], label: 'Call #' . $callId, summary: 'Call #' . $callId . ': reviewed as ' . $verdict);
 
         Http::data([
             'reviewed' => true,

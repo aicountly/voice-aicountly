@@ -102,6 +102,8 @@ final class RetentionService
                 'recording',
                 (string) $row['recording_uuid'],
                 ['reason' => 'retention_policy', 'call_id' => (int) $row['call_id']],
+                label: 'Recording of call #' . (int) $row['call_id'],
+                actor: 'system:retention',
             );
 
             $deleted++;

@@ -60,7 +60,7 @@ export const NAV: NavItem[] = [
   { to: '/reports', label: 'Reports', icon: BarChart3, permission: 'voice.reports.view', advanced: true },
   { to: '/integrations', label: 'Integrations', icon: Blocks, permission: 'voice.dashboard.view', advanced: true },
   { to: '/settings', label: 'Settings', icon: SettingsIcon, permission: 'voice.dashboard.view' },
-  { to: '/audit', label: 'Audit', icon: ShieldCheck, permission: 'voice.audit.view', advanced: true },
+  { to: '/audit', label: 'Audit trail', icon: ShieldCheck, permission: 'voice.audit.view', advanced: true },
   { to: '/access', label: 'Access', icon: ShieldCheck, permission: 'voice.dashboard.view', advanced: true },
   // Who may open this company in Voice — the company registry, natively here. Everyone sees their
   // own access and may ask for it; only the company owner changes it. Not behind a Voice permission.

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Aicountly\Api\Controllers;
 
+use Aicountly\Api\Audit;
 use Aicountly\Api\Db;
 use Aicountly\Api\Domain\FlowValidator;
 use Aicountly\Api\Http;
@@ -147,6 +148,13 @@ final class CallFlowsController extends Controller
             ], ['flow_id' => $flowId, 'cmp_id' => $ctx->cmpId]);
         }
 
+        // The definition itself is the flow's content and is not trailed; that a draft was saved, and how many
+        // steps it has, is.
+        Audit::record($ctx, $auth, 'voice.call_flow.draft_saved', 'call_flow', (string) $flowId, [
+            'version_id' => $versionId, 'nodes' => is_array($definition['nodes'] ?? null) ? count($definition['nodes']) : null,
+            'valid' => (bool) ($validation['valid'] ?? false),
+        ], label: (string) $flow['name']);
+
         Http::data(['version_id' => $versionId, 'validation' => $validation]);
     }
 
@@ -181,7 +189,7 @@ final class CallFlowsController extends Controller
             self::fail('validation_failed', 'This flow cannot be published while it has errors.', ['validation' => $validation]);
         }
 
-        Db::transaction(static function () use ($ctx, $flowId, $version, $auth, $validation): void {
+        Db::transaction(static function () use ($ctx, $flowId, $version, $auth, $validation, $flow): void {
             Db::update('voice_call_flow_versions', [
                 'status'       => 'published',
                 'validation'   => $validation,
@@ -194,6 +202,12 @@ final class CallFlowsController extends Controller
                 'draft_version_id'     => null,
                 'updated_at'           => Clock::sql(Clock::now()),
             ], ['flow_id' => $flowId, 'cmp_id' => $ctx->cmpId]);
+
+            // Publishing re-routes live calls: the audit row commits with it or the publish does not happen.
+            Audit::material($ctx, $auth, 'voice.call_flow.published', 'call_flow', (string) $flowId, [
+                'version_no' => (int) $version['version_no'],
+            ], before: ['live_version_id' => $flow['published_version_id']], after: ['live_version_id' => (int) $version['version_id'], 'version' => (int) $version['version_no']],
+                label: (string) $flow['name']);
         });
 
         Http::data(['published' => true, 'validation' => $validation]);
@@ -214,7 +228,7 @@ final class CallFlowsController extends Controller
 
     public static function create(): never
     {
-        [, $ctx] = self::enter('voice.flows.manage');
+        [$auth, $ctx] = self::enter('voice.flows.manage');
 
         $name = trim((string) (Http::body()['name'] ?? ''));
         if ($name === '') {
@@ -227,6 +241,7 @@ final class CallFlowsController extends Controller
             'name'        => $name,
             'description' => trim((string) (Http::body()['description'] ?? '')),
         ], 'flow_id');
+        Audit::record($ctx, $auth, 'voice.call_flow.created', 'call_flow', (string) $flowId, [], label: $name);
 
         Http::json(201, ['data' => ['flow_id' => $flowId, 'name' => $name]]);
     }

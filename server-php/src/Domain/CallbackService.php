@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Aicountly\Api\Domain;
 
+use Aicountly\Api\Audit;
 use Aicountly\Api\Auth;
 use Aicountly\Api\Context;
 use Aicountly\Api\Db;
@@ -72,6 +73,13 @@ final class CallbackService
             'status'         => $dueAt === null ? 'open' : 'scheduled',
             'created_by'     => $auth->uuid,
         ], 'callback_id');
+
+        Audit::record($ctx, $auth, 'voice.callback.created', 'callback', (string) $callbackId, [
+            'priority' => (string) ($input['priority'] ?? 'normal'), 'due_at' => $dueAt === null ? null : Clock::sql($dueAt),
+            'source_call_id' => isset($input['source_call_id']) ? (int) $input['source_call_id'] : null,
+            'campaign_id' => isset($input['campaign_id']) ? (int) $input['campaign_id'] : null,
+            'diary_requested' => $wantsDiary,
+        ], label: CallingPolicy::mask($e164));
 
         $message = null;
         if ($wantsDiary) {
@@ -148,6 +156,7 @@ final class CallbackService
         }
 
         Db::update('voice_callbacks', $values, ['callback_id' => $callbackId, 'cmp_id' => $ctx->cmpId]);
+        Audit::saved($ctx, $auth, 'callback', $callbackId, CallingPolicy::mask((string) $row['e164']), $row, $values);
 
         $message = null;
         if (!$diaryReady) {
