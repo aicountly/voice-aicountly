@@ -336,12 +336,16 @@ trigger exclusively via `workflow_dispatch`.
 | Deploy to cPanel Production | `web/dist/` then `server-php/` | document root, then `api/` inside it |
 | Deploy to cPanel Sandbox | `web/dist/` then `server-php/` | document root, then `api/` inside it |
 
-After the first deploy of this release, on the server:
+Each run applies the pending database migrations right after the API upload
+(`api/bin/migrate.php --status`, `--dry-run`, then the apply, over SSH); the
+**migrate** input is `apply` by default, `skip` leaves them for a manual run. On
+the very first deploy there is no `api/.env` yet, so run it with `skip`, then on
+the server:
 
 ```bash
 cd <document root>/api
 cp .env.example .env     # fill in CONSOLE_API_URL + CONSOLE_DB_DETAILS_KEY, DB_PASS, CREDENTIAL_ENCRYPTION_KEY and the rest
-php bin/migrate.php
+php bin/migrate.php      # or re-run the deploy with migrate: apply
 ```
 
 Then add the four workers to cron. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
