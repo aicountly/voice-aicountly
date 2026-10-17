@@ -17,6 +17,9 @@
 #                      a deploy): the page's <title> is checked instead.
 #   EXPECTED_REVISION  the commit just deployed. The Voice API does not report the revision it
 #                      runs, so it is not compared; the entry script stands for the build.
+#   EXPECT_MIGRATED    1: the deploy just applied the pending migrations (migrate=apply), so a
+#                      migration /api/health still lists as pending fails the run. Unset or 0
+#                      (migrate=skip, verify-live.yml): a pending migration only warns.
 #   VERIFY_BASE_URL    tests only: check this origin (e.g. http://127.0.0.1:18777) instead of the
 #                      environment's real one.
 set -uo pipefail
@@ -66,6 +69,23 @@ check_with_hint "degraded: the database is unreachable or not migrated. Check th
 # so a sandbox .env copied from the production template would otherwise talk to production.
 check json "Voice API environment (${target})" "${base}/api/health" \
   ".data.env == \"${target}\""
+
+# Every migration on disk is applied: /api/health counts the files in api/database/migrations against
+# voice_sql_migrations. Fatal after the deploy applied them (EXPECT_MIGRATED=1): one still pending then
+# means bin/migrate.php over SSH and the web app reach different databases (php bin/db-check.php in api/
+# says which one the command line reaches). Otherwise it warns: migrate=skip left them for a manual run.
+if [ "${EXPECT_MIGRATED:-0}" = 1 ]; then
+  if ! bash "$verify" json "Voice database migrations all applied (${target})" "${base}/api/health" \
+    '.data.database.schema.pending == 0'; then
+    failed=$((failed + 1))
+    echo "  The deploy applied the migrations, yet the web app still counts some as pending: compare php bin/db-check.php in api/ with data.database in /api/health (do they name the same database?)."
+  fi
+else
+  check_with_hint "pending migrations: in api/ on the server run php bin/migrate.php --dry-run, then php bin/migrate.php (docs/DEPLOYMENT.md, Apply the schema)." \
+    json "Voice database migrations all applied (${target})" "${base}/api/health" \
+    '.data.app == "Voice"' \
+    '.data.database.schema.pending == 0'
+fi
 
 # The web root serves the build just deployed, or at least the Voice page (fatal).
 if [ -n "$entry" ]; then

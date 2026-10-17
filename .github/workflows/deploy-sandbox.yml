@@ -6,13 +6,22 @@
 #
 # What it does: builds web/ on the runner, rsyncs the built dist/ over SSH to
 # the cPanel document root, then rsyncs server-php/ to the api/ folder inside
-# that same document root. No source, no node_modules, and no .env ever reach
-# the server.
+# that same document root, then applies pending database migrations with
+# api/bin/migrate.php over SSH (input migrate: apply, the default, or skip). No
+# source, no node_modules, and no .env ever reach the server.
 # ---------------------------------------------------------------------------
 name: Deploy to cPanel Sandbox
 
 on:
   workflow_dispatch:
+    inputs:
+      migrate:
+        description: Apply pending database migrations (api/bin/migrate.php) right after the API upload (skip = leave them for a manual run; the post-deploy checks then only warn while any is pending)
+        type: choice
+        options:
+          - apply
+          - skip
+        default: apply
 
 # Never let two deploys to the same target overlap.
 concurrency:
@@ -316,6 +325,102 @@ jobs:
           echo "Deployed server-php to \$REMOTE_ROOT/api/"
           echo "::notice::If this is the first API deploy, create api/.env on the server from server-php/.env.example — it is never uploaded."
 
+      # The new API is on the server; bring its database up to it before the live checks below.
+      # bin/migrate.php runs in api/ over SSH (deploy-target) under the first PHP CLI on the host
+      # that has pdo_pgsql: --status (what is pending), --dry-run (every pending file in one
+      # transaction, rolled back: a failure stops here with nothing applied), then the apply (each
+      # file in its own transaction, recorded in voice_sql_migrations). --baseline is never run
+      # here: only an operator knows how far a schema built without the runner goes
+      # (docs/DEPLOYMENT.md, Apply the schema). migrate=skip leaves the schema alone and the
+      # post-deploy checks then only warn about what is pending. By hand, in api/ on the server:
+      # php bin/migrate.php --dry-run, then php bin/migrate.php.
+      - name: Apply pending database migrations
+        timeout-minutes: 10
+        env:
+          MIGRATE: ${{ inputs.migrate || 'apply' }}
+          REMOTE_ROOT: ${{ secrets.SANDBOX_SSH_REMOTE_ROOT }}
+          DEPLOY_ENV: sandbox
+        run: |
+          # Not -e: every exit code below is checked by hand, so a refusal gets its own error
+          # instead of ending the step mid-pipeline.
+          set +e -uo pipefail
+          summary() { echo "- Database migrations (${DEPLOY_ENV}): $1" >> "$GITHUB_STEP_SUMMARY"; }
+
+          if [ "$MIGRATE" = "skip" ]; then
+            echo "::warning title=Migrations skipped::migrate=skip: pending database migrations were NOT applied. Apply them in api/ on the server: php bin/migrate.php --dry-run, then php bin/migrate.php."
+            summary "**skipped** (migrate=skip)"
+            exit 0
+          fi
+
+          # A remote root of ~/public_html is the same place as public_html: ssh starts in the
+          # home directory, and a quoted ~ would not expand.
+          api_q=$(printf '%q' "${REMOTE_ROOT#\~/}/api")
+          # Runs api/bin/migrate.php on the server with one option ('' = apply) under the first PHP
+          # CLI that has pdo_pgsql; prints its output (stderr included), returns its exit code.
+          runner() {
+            ssh deploy-target "api=${api_q} opt=$(printf '%q' "$1")"'
+              php=""
+              for c in /opt/cpanel/ea-php84/root/usr/bin/php /opt/cpanel/ea-php83/root/usr/bin/php /opt/cpanel/ea-php82/root/usr/bin/php /usr/local/bin/php; do
+                if [ -x "$c" ] && "$c" -m 2>/dev/null | grep -qx pdo_pgsql; then php="$c"; break; fi
+              done
+              if [ -z "$php" ]; then echo "no PHP CLI with pdo_pgsql found (ea-php84/83/82, /usr/local/bin/php)"; exit 3; fi
+              cd "$api" || { echo "no api/ folder at $api"; exit 3; }
+              echo "[$php bin/migrate.php${opt:+ $opt}]"
+              "$php" bin/migrate.php ${opt:+"$opt"} 2>&1'
+          }
+          # One pass, grouped in the log: its output in $out, its exit code in $rc.
+          pass() {
+            echo "::group::bin/migrate.php ${1:-(apply)}"
+            runner "$1" | tee "$RUNNER_TEMP/migrate.out"; rc=${PIPESTATUS[0]}
+            out=$(cat "$RUNNER_TEMP/migrate.out")
+            echo "::endgroup::"
+          }
+
+          pass --status
+          if [ "$rc" -ne 0 ]; then
+            if [ "$rc" -eq 3 ]; then
+              echo "::error title=Migrations not run::$(printf '%s\n' "$out" | tail -n 1). Nothing was applied."
+            elif printf '%s\n' "$out" | grep -q '^CHANGED '; then
+              echo "::error title=Applied migration changed::An applied migration file differs from the one recorded (checksum). Never edit an applied migration; add a new numbered file. Nothing was applied."
+            else
+              echo "::error title=Migration status failed::bin/migrate.php --status exited ${rc} (see the log above; php bin/db-check.php in api/ says why the database is not reached). Nothing was applied. On a first deploy api/.env does not exist yet: create it from api/.env.example, then re-run this deploy (or run it with migrate=skip until then)."
+            fi
+            summary "**not run**: --status exited ${rc}; nothing applied"
+            exit 1
+          fi
+          pending=$(printf '%s\n' "$out" | grep -c '^PENDING ')
+          if [ "$pending" -eq 0 ]; then
+            echo "Nothing pending: every migration is applied."
+            summary "none pending"
+            exit 0
+          fi
+          none_recorded=0
+          if ! printf '%s\n' "$out" | grep -q '^already '; then
+            none_recorded=1
+            echo "::notice title=No migration recorded::voice_sql_migrations records none of the ${pending} migrations: a new database, or one whose schema was built without bin/migrate.php. The migrations replay safely on an existing schema; the dry run below proves it before anything is applied."
+          fi
+
+          pass --dry-run
+          if [ "$rc" -ne 0 ]; then
+            if [ "$none_recorded" -eq 1 ] && printf '%s\n' "$out" | grep -qiE 'already exists|SQLSTATE\[(42P07|42710|42701)\]'; then
+              echo "::error title=Migration dry run failed::bin/migrate.php --dry-run failed on an object that already exists; nothing was applied. If this database's schema was built without bin/migrate.php, record what it already has once, by hand, in api/ on the server: php bin/migrate.php --baseline=NNN --dry-run, then php bin/migrate.php --baseline=NNN (NNN = the last migration it has; docs/DEPLOYMENT.md, Apply the schema). Then re-run this deploy."
+            else
+              echo "::error title=Migration dry run failed::bin/migrate.php --dry-run exited ${rc}; nothing was applied. See the log above."
+            fi
+            summary "**dry run failed** (exit ${rc}); nothing applied"
+            exit 1
+          fi
+
+          pass ""
+          applied=$(printf '%s\n' "$out" | sed -n 's/^applied  \(.*\)$/\1/p' | paste -sd ' ' -)
+          if [ "$rc" -ne 0 ]; then
+            failed=$(printf '%s\n' "$out" | grep -m1 '^FAILED' || true)
+            echo "::error title=Migration failed::bin/migrate.php exited ${rc}. ${failed:-See the log above.} The failing file was rolled back; files before it stay applied (${applied:-none}). The new API is already uploaded: fix the migration and re-run the deploy, or apply by hand in api/ on the server (php bin/migrate.php)."
+            summary "**failed** (exit ${rc}); applied before the failure: ${applied:-none}"
+            exit 1
+          fi
+          summary "applied ${pending}: ${applied}"
+
       # Is the live site really Voice, and the build just deployed? The host's
       # anti-bot page ("One moment, please...") answers some requests from
       # GitHub's runners with HTTP 200, so a status code proves nothing. These
@@ -330,6 +435,9 @@ jobs:
         env:
           VERIFY_SSH: ssh deploy-target
           EXPECTED_REVISION: ${{ github.sha }}
+          # The step above applied every pending migration, so one still pending fails the
+          # checks; after migrate=skip it only warns.
+          EXPECT_MIGRATED: ${{ (inputs.migrate || 'apply') == 'apply' && '1' || '0' }}
         run: |
           EXPECTED_ENTRY="$(grep -o 'assets/index-[^"]*\.js' web/dist/index.html | head -n 1 || true)"
           if [ -z "$EXPECTED_ENTRY" ]; then
@@ -347,6 +455,8 @@ jobs:
 
       - name: Summary
         if: always()
+        env:
+          MIGRATE: ${{ inputs.migrate || 'apply' }}
         run: |
           {
             echo "### Sandbox deploy"
@@ -356,6 +466,7 @@ jobs:
             echo "| Target | https://voice.gh.aicountly.com |"
             echo "| Web | \`web/dist/\` → document root |"
             echo "| API | \`server-php/\` → \`api/\` in the document root |"
+            echo "| Migrations | \`${MIGRATE}\` |"
             echo "| Commit | \`${GITHUB_SHA:0:7}\` |"
             echo "| Ref | \`${GITHUB_REF_NAME}\` |"
           } >> "$GITHUB_STEP_SUMMARY"

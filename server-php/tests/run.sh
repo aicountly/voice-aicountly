@@ -82,6 +82,10 @@ php "$ROOT/bin/migrate.php" > /dev/null
 # database above; the cases that take a migration record away put it back.
 php "$ROOT/tests/console_database.php"
 
+# bin/migrate.php against a throwaway database of its own (needs CREATEDB, skipped without it): --dry-run on a
+# fresh database, every migration replaying on a database that already has the schema, and --baseline.
+php "$ROOT/tests/migrate.php"
+
 php -S "127.0.0.1:$STUB_PORT" "$ROOT/tests/stub/router.php" > /dev/null 2>&1 &
 STUB_PID=$!
 trap 'kill $STUB_PID 2>/dev/null || true' EXIT

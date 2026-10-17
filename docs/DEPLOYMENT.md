@@ -21,6 +21,15 @@ normally `public_html` (or the subdomain's own document root).
 Deployment is manual only — **Actions → pick a workflow → Run workflow**.
 Nothing deploys on push or merge.
 
+Right after the API upload each run applies the pending database migrations:
+`api/bin/migrate.php --status`, then `--dry-run` (a failure stops the run with
+nothing applied), then the apply, over the same SSH connection and under the
+host's first PHP CLI with `pdo_pgsql` (ea-php84, 83, 82, then `/usr/local/bin/php`).
+The run's input **migrate** is `apply` by default; `skip` leaves the schema alone
+for a manual run (see [Apply the schema](#2-apply-the-schema)). After an apply the
+post-deploy checks fail while `/api/health` still counts a migration as pending;
+after `skip` they only warn.
+
 ## One workflow per environment, not per half
 
 Production and sandbox are genuinely separate targets — different SSH
@@ -141,10 +150,12 @@ itself, a system directory, or anything containing `..` is refused.
 
 1. Create the subdomain in cPanel and note its document root.
 2. Add the five SSH secrets for that environment.
-3. Run **Deploy to cPanel …**. This deploys web and API together; the API is
-   deployed but unconfigured until the next step.
+3. Run **Deploy to cPanel …** with **migrate: skip**. This deploys web and API
+   together; the API is deployed but unconfigured until the next step, so there
+   is no database to migrate yet (with `apply` the migration step stops the run
+   because it cannot connect).
 4. Create `api/.env` on the server (see above), from `server-php/.env.example`.
-5. Re-run **Deploy to cPanel …** (or just confirm the API), then confirm
+5. Re-run **Deploy to cPanel …** with **migrate: apply**, which applies the schema, then confirm
    `https://<host>/api/health` returns the right `env` and open the site to
    sign in. See [auth/AICOUNTLY_AUTH_WORKFLOW.md](auth/AICOUNTLY_AUTH_WORKFLOW.md)
    for what a healthy login looks like.
@@ -154,7 +165,8 @@ itself, a system directory, or anything containing `..` is refused.
 ## Voice API: first deploy of this release
 
 The API now has a database, background workers and provider credentials. Three
-steps on the server after the first deploy that includes them.
+steps on the server after the first deploy that includes them (the deploy itself
+applies the schema once `api/.env` exists; step 2 is the manual fallback).
 
 ### 1. Create the database and fill in the server `.env`
 
@@ -215,15 +227,59 @@ and a failure to obtain them is reported by its own `data.database.reason` with 
 
 ### 2. Apply the schema
 
+Each deploy run does this itself (input **migrate: apply**, the default): it runs
+`bin/migrate.php --status`, `--dry-run` and then the apply in `api/` over SSH, and
+stops with nothing applied if the dry run fails. By hand, in `api/` on the server —
+after a run with **migrate: skip**, or to look before a deploy:
+
 ```bash
 php bin/db-check.php            # is the database reached, and from where?
 php bin/migrate.php --status    # what would run, changes nothing
+php bin/migrate.php --dry-run   # run it all in a transaction, then roll it back
 php bin/migrate.php             # apply it
 ```
+
+On a cPanel host whose default `php` lacks `pdo_pgsql`, call the EasyApache one,
+e.g. `/opt/cpanel/ea-php84/root/usr/bin/php bin/migrate.php`.
 
 Each file runs in its own transaction and is recorded by name and checksum, so a
 half-applied migration cannot exist. An already-applied file that has since been
 edited is reported as drift and stops the run rather than being reapplied.
+`--dry-run` runs every pending file in order inside one transaction and rolls it
+all back, so it passes exactly when the apply would; nothing is applied or recorded.
+
+#### A database that already has the schema: `--baseline`
+
+`--status` listing **every** migration as `PENDING` on a database the app has been
+using means its schema was built without `bin/migrate.php` (by hand, or before the
+runner existed) and `voice_sql_migrations` records nothing. First make sure the
+command line and the web app reach the same database: `php bin/db-check.php` and
+`data.database` in `/api/health` should agree.
+
+The migrations are written to replay safely on a database that already has their
+objects (`CREATE … IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded constraints,
+`ON CONFLICT DO NOTHING` seeds), and `tests/migrate.php` proves it on every run. So
+the first thing to try is the ordinary run:
+
+```bash
+php bin/migrate.php --dry-run   # replays everything in a transaction and rolls it back
+php bin/migrate.php             # replays and records every file
+```
+
+If the dry run fails on an object that already exists in a different shape (a
+schema built from something other than these files), record the migrations the
+database already has instead of running them, then apply what is newer:
+
+```bash
+php bin/migrate.php --baseline=013 --dry-run   # what it would record, and the newer files dry-run on top
+php bin/migrate.php --baseline=013             # record 001–013 as applied WITHOUT running them, apply 014+
+```
+
+`--baseline=NNN` records every file numbered up to and including `NNN` (both
+`010_*` files for `--baseline=010`) with the checksum of the file on disk, and
+checks nothing about the objects themselves: name the last migration you know the
+database has. It is refused unless `voice_sql_migrations` is empty, and the deploy
+workflows never run it.
 
 ### 3. Add the workers to cron
 
@@ -292,7 +348,8 @@ control character is refused and nothing is sent.
 
 When moving an existing deployment onto AI Pulse:
 
-1. Deploy, then run `php bin/migrate.php` straight away: 009 adds the column
+1. Deploy (the run applies the migrations; after **migrate: skip** run
+   `php bin/migrate.php` straight away): 009 adds the column
    that keeps Pulse's id on each model-written summary, and until it has run
    such a summary cannot be saved.
 2. Delete `CONSOLE_API_URL` from `api/.env` — nothing reads it any more, and
@@ -346,7 +403,7 @@ In order:
    CALENDAR_SERVICE_KEY=<the same 64 hex characters>
    ```
 
-4. **Schema:** `php bin/migrate.php` — `010_voice_callback_diary.sql` adds the
+4. **Schema:** applied by the deploy (or `php bin/migrate.php` after **migrate: skip**) — `010_voice_callback_diary.sql` adds the
    entry's reference columns. Additive; nothing existing changes.
 5. **Cron:** `bin/call-recovery.php` (step 3 above) settles diary writes whose
    outcome was not confirmed — by asking Calendar, never by guessing — and
