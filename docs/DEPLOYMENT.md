@@ -224,6 +224,41 @@ php bin/migrate.php             # apply it
 Each file runs in its own transaction and is recorded by name and checksum, so a
 half-applied migration cannot exist. An already-applied file that has since been
 edited is reported as drift and stops the run rather than being reapplied.
+`--dry-run` runs every pending file in order inside one transaction and rolls it
+all back, so it passes exactly when the apply would; nothing is applied or recorded.
+
+#### A database that already has the schema: `--baseline`
+
+`--status` listing **every** migration as `PENDING` on a database the app has been
+using means its schema was built without `bin/migrate.php` (by hand, or before the
+runner existed) and `voice_sql_migrations` records nothing. First make sure the
+command line and the web app reach the same database: `php bin/db-check.php` and
+`data.database` in `/api/health` should agree.
+
+The migrations are written to replay safely on a database that already has their
+objects (`CREATE … IF NOT EXISTS`, `ADD COLUMN IF NOT EXISTS`, guarded constraints,
+`ON CONFLICT DO NOTHING` seeds), and `tests/migrate.php` proves it on every run. So
+the first thing to try is the ordinary run:
+
+```bash
+php bin/migrate.php --dry-run   # replays everything in a transaction and rolls it back
+php bin/migrate.php             # replays and records every file
+```
+
+If the dry run fails on an object that already exists in a different shape (a
+schema built from something other than these files), record the migrations the
+database already has instead of running them, then apply what is newer:
+
+```bash
+php bin/migrate.php --baseline=013 --dry-run   # what it would record, and the newer files dry-run on top
+php bin/migrate.php --baseline=013             # record 001–013 as applied WITHOUT running them, apply 014+
+```
+
+`--baseline=NNN` records every file numbered up to and including `NNN` (both
+`010_*` files for `--baseline=010`) with the checksum of the file on disk, and
+checks nothing about the objects themselves: name the last migration you know the
+database has. It is refused unless `voice_sql_migrations` is empty, and the deploy
+workflows never run it.
 
 ### 3. Add the workers to cron
 

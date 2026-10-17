@@ -224,7 +224,7 @@ the app and API are not same-origin.
 | `npm run build` | Type-check, then build to `web/dist/` |
 | `npm run typecheck` | Type-check only |
 | `npm run test:ui` | Frontend unit tests |
-| `php bin/migrate.php` | Apply pending migrations (`--status`, `--dry-run`) |
+| `php bin/migrate.php` | Apply pending migrations (`--status`, `--dry-run`; `--baseline=NNN` for a schema built without it — [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#a-database-that-already-has-the-schema---baseline)) |
 | `server-php/tests/run.sh` | The integration suite |
 
 ### Background workers
