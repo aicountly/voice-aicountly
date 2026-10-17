@@ -7,11 +7,17 @@ declare(strict_types=1);
  *
  *   php server-php/bin/migrate.php            apply everything not yet applied
  *   php server-php/bin/migrate.php --status   list what would run, change nothing
- *   php server-php/bin/migrate.php --dry-run  parse and check, roll back
+ *   php server-php/bin/migrate.php --dry-run  run every pending file, then roll all of it back
  *
  * Each file runs inside its own transaction and is recorded by name, so a
  * half-applied migration cannot exist: either the file is in and recorded, or
  * neither. Files are applied in filename order, which is why they are numbered.
+ *
+ * --dry-run runs the pending files in that same order inside ONE transaction
+ * and rolls it back at the end, so a file sees what the pending files before it
+ * create — exactly as it will when they are applied. (Rolling back after each
+ * file instead would fail 002 on a fresh database because 001's tables are
+ * gone again.) Nothing is applied and nothing is recorded.
  */
 
 namespace Aicountly\Api;
@@ -61,6 +67,11 @@ foreach (Db::all('SELECT filename, checksum FROM voice_sql_migrations') as $row)
 $pending = 0;
 $drift   = 0;
 
+// One transaction for the whole dry run, rolled back below: see the header.
+if ($dryRun && !$status) {
+    $pdo->beginTransaction();
+}
+
 foreach ($files as $path) {
     $name = basename($path);
     $sql = (string) file_get_contents($path);
@@ -89,13 +100,13 @@ foreach ($files as $path) {
     }
 
     try {
-        $pdo->beginTransaction();
-        $pdo->exec($sql);
         if ($dryRun) {
-            $pdo->rollBack();
+            $pdo->exec($sql);
             echo "ok (rolled back)  {$name}\n";
             continue;
         }
+        $pdo->beginTransaction();
+        $pdo->exec($sql);
         $stmt = $pdo->prepare('INSERT INTO voice_sql_migrations (filename, checksum) VALUES (:f, :c)');
         $stmt->execute(['f' => $name, 'c' => $checksum]);
         $pdo->commit();
@@ -106,6 +117,13 @@ foreach ($files as $path) {
         }
         fwrite(STDERR, "FAILED   {$name}\n         {$e->getMessage()}\n");
         exit(1);
+    }
+}
+
+if ($dryRun && $pdo->inTransaction()) {
+    $pdo->rollBack();
+    if ($pending > 0) {
+        echo "\nDry run: {$pending} pending migration(s) ran together and were rolled back. Nothing was applied.\n";
     }
 }
 
