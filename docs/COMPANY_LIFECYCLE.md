@@ -49,17 +49,24 @@ Recordings are stored under `RECORDING_STORAGE_PATH` and played through signed `
 
 ## Cron
 
-cPanel → Cron Jobs, with the PHP the deploy names:
+Installed by the production deploy, never by hand: `server-php/bin/ops/jobs.txt` (`bin/ops/post-deploy-jobs.sh` →
+`bin/ops/install-jobs.sh --apply`) holds three jobs, run from `api/` with the first PHP CLI on the host that has
+`pdo_pgsql`:
 
-```cron
-# Each line below reports to Console's Cron Job Monitor after the run (monitor in MON=; key CONSOLE_CRON_MONITOR_KEY in the api .env; never fails the line) — console-react-app docs/CRON_MONITORS.md.
-*/5 * * * * cd <remote root>/api && <php> lib/company-lifecycle/bin/worker.php --bootstrap=config/lifecycle-kit.php >> $HOME/logs/voice-company-lifecycle.log 2>&1; RC=$?; MON=voice.company_lifecycle; KEY=$(sed -n 's/^CONSOLE_CRON_MONITOR_KEY *= *//p' .env | tr -d "\"' \r"); BASE=$(sed -n 's/^CONSOLE_API_BASE *= *//p' .env | tr -d "\"' \r"); [ -n "$KEY" ] && curl -fsS -m 5 -o /dev/null -X POST "${BASE:-https://console.aicountly.org/api}/portal/cron-heartbeat" -H "X-Console-Cron-Key: $KEY" -H 'Content-Type: application/json' -d "{\"monitor\":\"$MON\",\"run_id\":\"$MON-$(date +\%s)-$$\",\"outcome\":\"$([ $RC = 0 ] && echo ok || echo error)\",\"finished_at\":$(date +\%s)}" || true
-37 3 * * *  cd <remote root>/api && <php> lib/company-lifecycle/bin/worker.php --bootstrap=config/lifecycle-kit.php --expire-retained >> $HOME/logs/voice-company-lifecycle.log 2>&1; RC=$?; MON=voice.company_lifecycle_expiry; KEY=$(sed -n 's/^CONSOLE_CRON_MONITOR_KEY *= *//p' .env | tr -d "\"' \r"); BASE=$(sed -n 's/^CONSOLE_API_BASE *= *//p' .env | tr -d "\"' \r"); [ -n "$KEY" ] && curl -fsS -m 5 -o /dev/null -X POST "${BASE:-https://console.aicountly.org/api}/portal/cron-heartbeat" -H "X-Console-Cron-Key: $KEY" -H 'Content-Type: application/json' -d "{\"monitor\":\"$MON\",\"run_id\":\"$MON-$(date +\%s)-$$\",\"outcome\":\"$([ $RC = 0 ] && echo ok || echo error)\",\"finished_at\":$(date +\%s)}" || true
-```
+| Job | Schedule | Command |
+|---|---|---|
+| `company-lifecycle` | `*/5 * * * *` | `worker.php --bootstrap=config/lifecycle-kit.php` — the purges Manage queued, and their acks |
+| `company-lifecycle-expiry` | `37 3 * * *` | `… --expire-retained` (kit 1.1) — the daily retention expiry |
+| `lifecycle-archive-drop` | `17 3 * * 0` | `… --drop-archives-older-than=90 --confirm` — weekly, purge archives (they hold personal data) dropped after the 90-day window |
 
-The second line (kit 1.1) is the daily retention expiry: Voice retains nothing today, so it expires nothing, but
+The deploy also replaces any lifecycle lines pasted by hand from an older copy of this page (they logged to
+`voice-company-lifecycle.log`), writes `CONSOLE_CRON_MONITOR_KEY` (repository secret) into `api/.env`, and prints
+the queued purges (`--status`) before installing. Check on the server with
+`bash <remote root>/api/bin/ops/install-jobs.sh --check`.
+
+The expiry job (kit 1.1) is the daily retention expiry: Voice retains nothing today, so it expires nothing, but
 a retained table given a period later is expired without a deploy step (and a held target is skipped). Console
-monitors (Console `cron_monitors`, console-react-app migration 068, `docs/CRON_MONITORS.md`; the cron lines above report to them): `voice.company_lifecycle` and
+monitors (Console `cron_monitors`, console-react-app migration 068, `docs/CRON_MONITORS.md`; the first two jobs report to them through `bin/ops/run-job.php --monitor=…`): `voice.company_lifecycle` and
 `voice.company_lifecycle_expiry`.
 
 **Voice as a sender** (kit 1.1 `DeferredSend`): a callback's diary entry that Aicountly Calendar answers 423
@@ -69,12 +76,6 @@ at most hourly per company (`MANAGE_PRODUCT_SERVICE_KEY`): still read-only → w
 `restricted_until` or in an hour); active again or `restricted_until` passed → the same attempt is sent again;
 deleted there (or Calendar says `lifecycle: purged`) → `failed` with `error_code = dropped_company_deleted` and an
 audit event. An AI agent's live booking in Appointments cannot wait for a renewal and stays a plain refusal.
-
-Weekly, drop purge archives (they hold personal data) after the 90-day window:
-
-```cron
-17 3 * * 0 cd <remote root>/api && <php> lib/company-lifecycle/bin/worker.php --bootstrap=config/lifecycle-kit.php --drop-archives-older-than=90 --confirm >> $HOME/logs/voice-company-lifecycle.log 2>&1
-```
 
 Operator commands (`--status`, `--dry-run=company:<cmp_id>`, `--dry-run=account:<uuid>`,
 `--requeue=<event_id>`, `--list-archives`, `--restore=<schema> --confirm`, kit 1.1 `--expire-retained=dry-run`,
@@ -96,7 +97,7 @@ The worker needs `CREATE` on the product database for the archive schemas
 every table, the kit's five (`aic_lifecycle_events / _state / _jobs / _acks / _expiries`) and their sequences
 included.
 
-**Go live:** deploy → apply the migration → install the cron → set `LIFECYCLE_WEBHOOK_SECRET` and
+**Go live:** deploy (it applies the migration and installs the cron) → set `LIFECYCLE_WEBHOOK_SECRET` and
 `MANAGE_API_URL` here → in Manage set `LIFECYCLE_WEBHOOK_SECRET_VOICE` (same value; and
 `LIFECYCLE_WEBHOOK_URL_VOICE` if the catalog host is not this API) → update manage-aicountly
 `docs/company-lifecycle/README.md` §10.
