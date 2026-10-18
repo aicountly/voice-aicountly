@@ -236,7 +236,7 @@ Voice-owned work only. None of these copies another product's database.
 | `bin/campaign-worker.php` | every minute | Claims a bounded batch of campaign attempts and dials them |
 | `bin/call-recovery.php` | every few minutes | Marks calls whose provider went quiet as stale; reconciles unknown external writes |
 | `bin/retention.php` | daily, off-peak | Deletes recordings, transcripts and index entries that are past their retention |
-| `lib/company-lifecycle/bin/worker.php --bootstrap=config/lifecycle-kit.php` | every 5 minutes | Runs the purges Manage queued (a lapsed company, a closed account), deletes the purged recordings, acks Manage — [docs/COMPANY_LIFECYCLE.md](docs/COMPANY_LIFECYCLE.md) |
+| `lib/company-lifecycle/bin/worker.php --bootstrap=config/lifecycle-kit.php` | every 5 minutes | Runs the purges Manage queued (a lapsed company, a closed account), deletes the purged recordings, acks Manage. Installed by the production deploy (with the daily expiry and weekly archive drop) — [docs/COMPANY_LIFECYCLE.md](docs/COMPANY_LIFECYCLE.md) |
 
 Several copies of the campaign worker can run at once: every attempt is claimed
 with a conditional `UPDATE` before anything is dialled, and a unique index is the
