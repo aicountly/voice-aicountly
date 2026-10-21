@@ -8,10 +8,13 @@ declare(strict_types=1);
  * Deployed to <document root>/api, so it is same-origin with the React app on
  * both voice.aicountly.com and voice.gh.aicountly.com.
  *
- * Two surfaces live here:
+ * Three surfaces live here:
  *
  *   /api/global/{path}   the allow-listed relay to the portal auth API, which
- *                        predates the rest of this product and is unchanged.
+ *                        predates the rest of this product.
+ *   /api/manage/v1/...   the allow-listed relay to Manage's company registry
+ *                        (src/ManageRelay.php), so the browser never calls
+ *                        manage.aicountly.com cross-site.
  *   /api/...             the Voice API proper — see src/Routes.php for the
  *                        whole surface.
  *
@@ -42,6 +45,10 @@ const RELAYED_PATHS = [
     'seskey',
     'seskey/refresh',
     'refresh_authtoken',
+    // Sign-out. The browser used to POST my.aicountly.com/api/logout itself; from networks the
+    // hosting's bot shield distrusts that cross-site call got a challenge page with no CORS
+    // headers and failed, leaving the portal token alive. Same-origin through here, it passes.
+    'logout',
 ];
 
 // ---------------------------------------------------------------------------
@@ -116,7 +123,7 @@ function apply_cors(): void
 
     header('Access-Control-Allow-Origin: ' . $origin);
     header('Access-Control-Allow-Headers: Authorization, Content-Type, Idempotency-Key, X-Service-Key, X-Actor-Uuid, X-Correlation-Id, Last-Event-ID');
-    header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
+    header('Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS');
     header('Access-Control-Max-Age: 600');
     header('Vary: Origin');
 }
@@ -187,6 +194,21 @@ if (strpos($path, 'global/') === 0) {
 
 // Who the caller is, per the portal. Predates /v1 and is kept for the SPA's
 // boot sequence.
+// Manage's company registry (Users & Access, My workspaces, the company picker), same-origin for
+// the same reason as the portal relay above: a cross-site call to manage.aicountly.com can be
+// answered by the hosting's bot shield with a challenge page that has no CORS headers, and the
+// browser then sees no response at all. ManageRelay forwards only the calls the shared client
+// makes; the raw (still encoded) path is passed so each segment is decoded and checked once.
+if ($path === 'manage' || strpos($path, 'manage/') === 0) {
+    ManageRelay::serve($method, $uri, (string) ($_SERVER['QUERY_STRING'] ?? ''), [
+        'Authorization'    => authorization_header(),
+        'Content-Type'     => (string) ($_SERVER['CONTENT_TYPE'] ?? ''),
+        'Accept'           => (string) ($_SERVER['HTTP_ACCEPT'] ?? ''),
+        'Idempotency-Key'  => (string) ($_SERVER['HTTP_IDEMPOTENCY_KEY'] ?? ''),
+        'X-Correlation-Id' => (string) ($_SERVER['HTTP_X_CORRELATION_ID'] ?? ''),
+    ], (string) file_get_contents('php://input'));
+}
+
 if ($path === 'session') {
     $header = authorization_header();
     $sesKey = preg_match('/Bearer\s+(.+)/i', $header, $matches) === 1 ? trim($matches[1]) : '';

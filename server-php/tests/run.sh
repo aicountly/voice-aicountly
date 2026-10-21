@@ -117,3 +117,8 @@ E8ID_API_PORT="${E8ID_API_PORT:-$((STUB_PORT+40))}" E8ID_PORTAL_FAULT_PORT="${E8
 # unless E8ID_MESSAGING_SERVER_PHP names a messaging-aicountly/server-php checkout and E8ID_MSG_DB_* a
 # throwaway database for it).
 env -u DB_NAME -u DB_USER -u DB_PASS php "$ROOT/tests/e8id_messaging_contract.php"
+
+# The same-origin relays to Manage's company registry (/api/manage/v1/*) and the portal's logout:
+# the allowlist against web/src/company-access/companyRegistryClient.ts, the refusals, and real HTTP
+# through index.php against a fake Manage (headers, body, status, 504 when Manage does not answer).
+MANAGE_RELAY_API_PORT="${MANAGE_RELAY_API_PORT:-$((STUB_PORT+50))}" php "$ROOT/tests/manage_relay.php"
