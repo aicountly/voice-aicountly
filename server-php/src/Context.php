@@ -34,7 +34,7 @@ final class Context
     /**
      * Manage's verdict per company and session, for this request.
      *
-     * @var array<string, array{owner: bool}>
+     * @var array<string, array{owner: bool, plan?: array<string, mixed>|null}>
      */
     private static array $verified = [];
 
@@ -151,7 +151,11 @@ final class Context
             Http::error(503, 'context_unavailable', 'Cannot confirm company access right now. Please retry.', ['retryable' => true]);
         }
 
-        self::$verified[$key] = ['owner' => $answer['isOwner']];
+        self::$verified[$key] = [
+            'owner' => $answer['isOwner'],
+            // The company's plan for Voice from the same answer (CONTRACTS §3.5); null = no limits.
+            'plan'  => PlanEntitlements::fromCompanyInfo(is_array($result['body'] ?? null) ? $result['body'] : null),
+        ];
     }
 
     /**
@@ -169,13 +173,30 @@ final class Context
         return (self::$verified[$this->cmpId . ':' . $auth->fingerprint()]['owner'] ?? false) === true;
     }
 
+    /**
+     * The company's plan for Voice as Manage's companyinfo stated it on this request
+     * (PlanEntitlements), or null — no plan known, which means no limits: a Manage that predates
+     * plans, a stream ticket, or a product's service key (never asked about a plan).
+     *
+     * @return array<string, mixed>|null
+     */
+    public function plan(Auth $auth): ?array
+    {
+        if ($auth->isService()) {
+            return null;
+        }
+        $plan = self::$verified[$this->cmpId . ':' . $auth->fingerprint()]['plan'] ?? null;
+
+        return is_array($plan) ? $plan : null;
+    }
+
     /** CLI only — the test suite stands in for Manage rather than reaching it. */
-    public static function trustForTesting(int $cmpId, Auth $auth, bool $owner = false): void
+    public static function trustForTesting(int $cmpId, Auth $auth, bool $owner = false, ?array $plan = null): void
     {
         if (PHP_SAPI !== 'cli') {
             return;
         }
-        self::$verified[$cmpId . ':' . $auth->fingerprint()] = ['owner' => $owner];
+        self::$verified[$cmpId . ':' . $auth->fingerprint()] = ['owner' => $owner, 'plan' => $plan === null ? null : PlanEntitlements::normalize($plan)];
     }
 
     /** CLI only — forget every memoised verdict, so one test cannot vouch for the next. */

@@ -98,6 +98,10 @@ done
 
 php "$ROOT/tests/integration.php"
 
+# Plan limits (CONTRACTS §3.6): voice.max_numbers and voice.max_agents from the company's plan in Manage's
+# companyinfo — 402 PLAN_LIMIT_REACHED on adding one more, never on a call, a read or a service key.
+php "$ROOT/tests/plan_limits.php"
+
 # Usage metering: what is reported to Manage's usage meter for each ended call,
 # and that a callback or a hang-up answers the same with metering off or broken.
 php "$ROOT/tests/metering.php"
