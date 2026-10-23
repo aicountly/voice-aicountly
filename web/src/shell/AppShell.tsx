@@ -25,6 +25,7 @@ import { BrowseCompaniesButton, RestrictedCompanyNotice } from './CompanyDiscove
 import { manageProfilePath, openManagePortal } from '../services/appLauncher'
 import './app-shell.css'
 import { CompanyRestrictedBanner } from '../components/CompanyRestrictedBanner'
+import { PlanLimitToast } from '../components/PlanLimitToast'
 
 export function AppShell() {
   const { company, companies, branchId, switchCompany, switchBranch, isRestricted, can, status, error, reload } = useVoice()
@@ -204,6 +205,7 @@ export function AppShell() {
 
         <main id="main" tabIndex={-1} className="vpage">
           <CompanyRestrictedBanner cmpId={company.cmp_id} />
+          <PlanLimitToast />
           {/* The tenant boundary. See the file comment. */}
           <div key={`${company.cmp_id}:${branchId}`}>
             <Suspense fallback={<LoadingRows rows={5} height={72} />}>

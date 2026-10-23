@@ -167,12 +167,38 @@ Companies and who may open them belong to Aicountly Manage's company registry; V
   `details.reason = COMPANY_ACCESS_REQUIRED`. `GET /v1/companies` keeps Manage's `can_open_in_current_app` /
   `app_access_status` per row; a company marked `false` is never selected.
 - **Users & Access:** `/users-access` (nav → Users & Access) renders the shared `CompanyUsersAccessPanel` and
-  `MyWorkspacesPanel` (`web/src/company-access/`, copied verbatim from manage-aicountly
-  `Saas Common Handler/company-access`; client in `web/src/services/companyRegistry.ts`). Permission profiles
-  on the Access screen still decide what people may do inside Voice.
+  `MyWorkspacesPanel` (`web/src/company-access/`, **1.2.0**, copied verbatim from manage-aicountly
+  `Saas Common Handler/company-access`; client in `web/src/services/companyRegistry.ts`). A workspace owner
+  renames the workspace, invites with sharing settings and edits each member's sharing settings there
+  (`WorkspaceManager` inside `MyWorkspacesPanel`). Permission profiles on the Access screen still decide what
+  people may do inside Voice.
+- **Same-origin relay:** `server-php/src/ManageRelay.php` forwards exactly the shared client's calls (all 29
+  of 1.2.0, incl. `PATCH v1/workspaces/{id}`, member settings, `v1/app-roles`, `v1/company-creation-targets`,
+  creator-access retry, `v1/companies/{cmp}/plan`, `v1/me/plan`, `v1/me/pending`); `tests/manage_relay.php`
+  fails if the two drift.
+- **Workspace-wide access:** someone the owner let into every company of the workspace
+  (`app_access_source: workspace` in companyinfo) is treated like anyone Manage lets in: Voice seats nobody
+  on first entry — a person without a permission profile gets the default member grants, and a calling
+  profile (agent) is created deliberately by someone with `voice.team.manage` — so there is no local seat to
+  create and Voice serves no `/api/internal/manage/seats` route.
 - **Discovery ≠ access:** the company picker's "Browse all workspace companies" lists every company in the
   person's workspaces; a restricted one opens "Request access", never the company, and the API re-checks
   every scoped request with Manage whatever the browser shows.
+
+## Plan limits
+
+The company's plan for Voice comes from Manage's `companyinfo` (`plan.entitlements`, CONTRACTS §3.5); values
+are data in Engage. Adding one more beyond a limit answers **402** `{"error":{"code":"PLAN_LIMIT_REACHED",
+"details":{"code","limit","used"}}}` and the web shows "Your plan allows N … — ask the account owner to upgrade
+in Manage" with a link to Manage's Plans & billing. No plan (an older Manage), an absent code or an unreadable
+value = no limit. **A call is never refused:** inbound calls, provider webhooks, placing and answering calls,
+reads, exports, deletes and a product's service-key calls are never checked, and numbers and agents over a
+limit after a downgrade keep working (`server-php/src/PlanEntitlements.php`).
+
+| Code | What is counted | Where enforced |
+| --- | --- | --- |
+| `voice.max_numbers` | Active business numbers of the company | `POST /api/v1/numbers` adding one, or switching one back on |
+| `voice.max_agents` | Active human agents (calling profiles); AI voice agents are not counted | `POST /api/v1/agents` adding one, or switching one back on |
 
 ## Layout
 

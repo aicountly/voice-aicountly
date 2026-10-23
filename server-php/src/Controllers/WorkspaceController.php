@@ -10,6 +10,7 @@ use Aicountly\Api\Domain\CallingPolicy;
 use Aicountly\Api\Domain\PresenceService;
 use Aicountly\Api\Http;
 use Aicountly\Api\Permissions;
+use Aicountly\Api\PlanEntitlements;
 use Aicountly\Api\Settings;
 use Aicountly\Api\Support\Clock;
 
@@ -97,6 +98,12 @@ final class WorkspaceController extends Controller
         $before = $numberId > 0
             ? Db::first('SELECT * FROM voice_numbers WHERE number_id = :id AND cmp_id = :cmp', ['id' => $numberId, 'cmp' => $ctx->cmpId])
             : null;
+        // The company's plan (voice.max_numbers): a new active number, or one switched back on, is one
+        // more. Editing or switching one off never is, and nothing that rings today stops ringing.
+        if ($values['is_active'] && ($numberId === 0 || ($before !== null && !self::truthy($before['is_active'] ?? null)))) {
+            PlanEntitlements::assertWithin($ctx, $auth, PlanEntitlements::MAX_NUMBERS,
+                static fn (): int => PlanEntitlements::activeNumbers($ctx->cmpId));
+        }
         if ($numberId > 0) {
             $updated = Db::update('voice_numbers', $values, ['number_id' => $numberId, 'cmp_id' => $ctx->cmpId]);
             if ($updated === 0) {
@@ -257,6 +264,19 @@ final class WorkspaceController extends Controller
         ];
 
         $agentId = isset($body['agent_id']) ? (int) $body['agent_id'] : 0;
+        // The company's plan (voice.max_agents): a new active agent, or one switched back on, is one more.
+        if ($values['is_active']) {
+            // A switched-off agent of this company being switched back on (Db::scalar reads a FALSE column as
+            // "no row", so the question is asked as a count).
+            $reactivated = $agentId > 0 && (int) Db::scalar(
+                'SELECT COUNT(*) FROM voice_agents WHERE agent_id = :id AND cmp_id = :cmp AND is_active = FALSE',
+                ['id' => $agentId, 'cmp' => $ctx->cmpId],
+            ) === 1;
+            if ($agentId === 0 || $reactivated) {
+                PlanEntitlements::assertWithin($ctx, $auth, PlanEntitlements::MAX_AGENTS,
+                    static fn (): int => PlanEntitlements::activeAgents($ctx->cmpId));
+            }
+        }
         // The write and its audit row commit together: a voice_role change decides what somebody may do on calls.
         $agentId = Db::transaction(function () use ($ctx, $auth, $values, $agentId, $userUuid): int {
             $before = $agentId > 0
@@ -790,5 +810,11 @@ final class WorkspaceController extends Controller
         Permissions::forget();
 
         Http::data(['revoked' => true]);
+    }
+
+    /** A PostgreSQL boolean as PDO returns it (bool, 't'/'f', 1/0). */
+    private static function truthy(mixed $value): bool
+    {
+        return $value === true || $value === 1 || $value === '1' || $value === 't' || $value === 'true';
     }
 }
