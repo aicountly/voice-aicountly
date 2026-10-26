@@ -5,10 +5,14 @@
 # never deploys. Add no push/pull_request/schedule triggers to this file.
 #
 # What it does: builds web/ on the runner, rsyncs the built dist/ over SSH to
-# the cPanel document root, then rsyncs server-php/ to the api/ folder inside
-# that same document root, then applies pending database migrations with
-# api/bin/migrate.php over SSH (input migrate: apply, the default, or skip). No
-# source, no node_modules, and no .env ever reach the server.
+# the cPanel document root, then rsyncs server-php/ to a stage folder outside
+# the document root (~/.aicountly-deploy/voice-production/stage), applies pending
+# database migrations from the stage with bin/migrate.php over SSH (input
+# migrate: apply, the default, or skip) and puts the new API live ATOMICALLY:
+# server-php/bin/ops/atomic-switch.sh builds a complete release folder and
+# swaps the api/ symlink to it with one rename, so no request ever runs a mix
+# of old and new files (docs: DEPLOY_SAFETY.md in console-react-app
+# ops/estate/kit). No source, no node_modules, and no .env ever reach the server.
 # ---------------------------------------------------------------------------
 name: Deploy to cPanel Production
 
@@ -22,6 +26,10 @@ on:
           - apply
           - skip
         default: apply
+      business_hours_reason:
+        description: Deploying between 08:00 and 20:00 IST needs the owner's explicit permission — say who allowed it and why (empty = refused in business hours)
+        type: string
+        default: ''
 
 # Never let two deploys to the same target overlap.
 concurrency:
@@ -40,6 +48,14 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Owner's rule (2026-10-26): production deploys run 20:00-08:00 IST; in business hours only with
+      # the owner's explicit permission, recorded in the job summary (DEPLOY_SAFETY.md §2). Before any
+      # build or upload; the reason is passed through env, never interpolated into the script.
+      - name: Production deploy window (20:00-08:00 IST)
+        env:
+          BUSINESS_HOURS_REASON: ${{ inputs.business_hours_reason }}
+        run: bash scripts/ops/deploy-window.sh production "$BUSINESS_HOURS_REASON"
 
       # Fail before doing any work if the deploy target is not fully
       # configured. Without this an unset secret would silently expand to an
@@ -271,16 +287,20 @@ jobs:
           # --delete keeps the docroot free of files removed from the build.
           # The excludes below protect paths that are not part of the web build
           # and must survive a deploy:
-          #   api/         — the PHP backend lives inside the document root and
-          #                  is deployed by the next step. Without this exclude
-          #                  this step would delete the entire API.
+          #   /api         — the PHP backend lives inside the document root and
+          #                  is deployed by the steps below. Without this exclude
+          #                  this step would delete the entire API. It is a
+          #                  SYMLINK to the current release (atomic deploys), so
+          #                  the pattern is '/api', never 'api/': a trailing
+          #                  slash matches real directories only, and --delete
+          #                  would remove the symlink and take the API down.
           #   .env         — server-side env file, if one is placed there
           #   .well-known/ — Let's Encrypt / AutoSSL validation; deleting it
           #                  breaks certificate renewal
           #   cgi-bin/     — cPanel-managed, present in every docroot
           #   .git*        — never publish repository metadata
           rsync -avz --delete \
-            --exclude='api/' \
+            --exclude='/api' \
             --exclude='.env' \
             --exclude='.env.*' \
             --exclude='.git*' \
@@ -290,30 +310,27 @@ jobs:
             -e ssh \
             web/dist/ "deploy-target:$REMOTE_ROOT/"
 
-      - name: Deploy server-php to the api folder
+      # The API is never rsynced into api/ again: that wrote the new files over the live ones while
+      # they served requests, and a request that loaded some of each died with an empty 500. It goes to
+      # a stage folder OUTSIDE the document root; the migrations run from there and the switch step
+      # below makes it live with one rename.
+      - name: Upload server-php to the stage folder
         env:
-          REMOTE_ROOT: ${{ secrets.PROD_SSH_REMOTE_ROOT }}
+          DEPLOY_ENV: production
         run: |
-          # The API's .env is created once by hand on the server and read at
-          # runtime on every request, unlike the web build. It must never be
-          # uploaded and must never be deleted, hence the excludes below
-          # combined with --delete.
+          # The API's .env is created once by hand on the server (in api/) and is never uploaded; the
+          # switch carries the live one into each release. .env.example has no secrets and ships.
+          # Rsync filter rules are first-match-wins, so the include has to come before the broader
+          # .env.* exclude or it would never be reached.
           #
-          # .env.example has no secrets and is meant to ship with the API: the
-          # notice below assumes it's already on the server as the template
-          # for that api/.env. Rsync filter rules are first-match-wins, so the
-          # include has to come before the broader .env.* exclude or it would
-          # never be reached.
-          #
-          # tests/ is dev-only and is never shipped: requested over HTTP its
-          # scripts run against the live api/.env, and tests/integration.php (and
-          # tests/seed-walkthrough.php) truncate every Voice table on the
-          # database that .env names. 'H' hides it on the sender only, so --delete
-          # also removes a copy an earlier deploy left behind, where a plain
-          # --exclude would protect that copy. bin/ and database/ still ship: the
-          # cron workers and migrations run them over SSH, and .htaccess 404s
-          # them over HTTP.
-          rsync -avz --delete \
+          # tests/ is dev-only and is never shipped: requested over HTTP its scripts run against the
+          # live api/.env, and tests/integration.php (and tests/seed-walkthrough.php) truncate every
+          # Voice table on the database that .env names. 'H' hides it on the sender only, so --delete
+          # also removes a copy an earlier deploy left in the stage. bin/ and database/ still ship:
+          # the cron workers and migrations run them over SSH, and .htaccess 404s them over HTTP.
+          stage=".aicountly-deploy/voice-${DEPLOY_ENV}/stage"
+          ssh deploy-target "mkdir -p $(printf '%q' "$stage") && chmod 700 .aicountly-deploy"
+          rsync -az --delete \
             --exclude='.env' \
             --include='.env.example' \
             --exclude='.env.*' \
@@ -321,13 +338,13 @@ jobs:
             --filter='H /tests/' \
             --chmod=D755,F644 \
             -e ssh \
-            server-php/ "deploy-target:$REMOTE_ROOT/api/"
+            server-php/ "deploy-target:$stage/"
+          echo "Uploaded server-php to ~/$stage (not live yet)."
 
-          echo "Deployed server-php to \$REMOTE_ROOT/api/"
-          echo "::notice::If this is the first API deploy, create api/.env on the server from server-php/.env.example — it is never uploaded."
-
-      # The new API is on the server; bring its database up to it before the live checks below.
-      # bin/migrate.php runs in api/ over SSH (deploy-target) under the first PHP CLI on the host
+      # The new API is in the stage; bring the database up to it BEFORE it goes live (expand-only
+      # migrations, so the code still serving keeps working). bin/migrate.php runs IN THE STAGE with
+      # the live api/.env copied in for the duration (removed again by the switch step and by the
+      # clean-up step), over SSH (deploy-target) under the first PHP CLI on the host
       # that has pdo_pgsql: --status (what is pending), --dry-run (every pending file in one
       # transaction, rolled back: a failure stops here with nothing applied), then the apply (each
       # file in its own transaction, recorded in voice_sql_migrations). --baseline is never run
@@ -356,17 +373,20 @@ jobs:
           # A remote root of ~/public_html is the same place as public_html: ssh starts in the
           # home directory, and a quoted ~ would not expand.
           api_q=$(printf '%q' "${REMOTE_ROOT#\~/}/api")
-          # Runs api/bin/migrate.php on the server with one option ('' = apply) under the first PHP
+          stage_q=$(printf '%q' ".aicountly-deploy/voice-${DEPLOY_ENV}/stage")
+          # Runs the STAGE's bin/migrate.php on the server, against the live database (the live
+          # api/.env copied into the stage, 0600), with one option ('' = apply) under the first PHP
           # CLI that has pdo_pgsql; prints its output (stderr included), returns its exit code.
           runner() {
-            ssh deploy-target "api=${api_q} opt=$(printf '%q' "$1")"'
+            ssh deploy-target "api=${api_q} stage=${stage_q} opt=$(printf '%q' "$1")"'
               php=""
               for c in /opt/cpanel/ea-php84/root/usr/bin/php /opt/cpanel/ea-php83/root/usr/bin/php /opt/cpanel/ea-php82/root/usr/bin/php /usr/local/bin/php; do
                 if [ -x "$c" ] && "$c" -m 2>/dev/null | grep -qx pdo_pgsql; then php="$c"; break; fi
               done
               if [ -z "$php" ]; then echo "no PHP CLI with pdo_pgsql found (ea-php84/83/82, /usr/local/bin/php)"; exit 3; fi
-              cd "$api" || { echo "no api/ folder at $api"; exit 3; }
-              echo "[$php bin/migrate.php${opt:+ $opt}]"
+              cd "$stage" || { echo "no stage folder at $stage"; exit 3; }
+              if [ -f "$api/.env" ]; then (umask 077; cp -p "$api/.env" .env) || { echo "could not copy $api/.env into the stage"; exit 3; }; fi
+              echo "[$php bin/migrate.php${opt:+ $opt}] (in the stage, against the live database)"
               "$php" bin/migrate.php ${opt:+"$opt"} 2>&1'
           }
           # One pass, grouped in the log: its output in $out, its exit code in $rc.
@@ -416,11 +436,39 @@ jobs:
           applied=$(printf '%s\n' "$out" | sed -n 's/^applied  \(.*\)$/\1/p' | paste -sd ' ' -)
           if [ "$rc" -ne 0 ]; then
             failed=$(printf '%s\n' "$out" | grep -m1 '^FAILED' || true)
-            echo "::error title=Migration failed::bin/migrate.php exited ${rc}. ${failed:-See the log above.} The failing file was rolled back; files before it stay applied (${applied:-none}). The new API is already uploaded: fix the migration and re-run the deploy, or apply by hand in api/ on the server (php bin/migrate.php)."
+            echo "::error title=Migration failed::bin/migrate.php exited ${rc}. ${failed:-See the log above.} The failing file was rolled back; files before it stay applied (${applied:-none}). The new API is NOT live (it waits in the stage; the code serving is unchanged): fix the migration and re-run the deploy."
             summary "**failed** (exit ${rc}); applied before the failure: ${applied:-none}"
             exit 1
           fi
           summary "applied ${pending}: ${applied}"
+
+      # The switch. atomic-switch.sh (shipped in the stage) copies the stage into a new release folder
+      # under ~/aicountly-releases/<document root>-api/releases/ (files unchanged since the last release
+      # are hard-linked), carries the live .env over, writes REVISION, and points api/ at it with ONE
+      # rename. The first run converts the plain api/ folder (kept as releases/<time>-pre-atomic). The
+      # health route must then answer 2xx/3xx, or the previous code is put back at once (exit 21). No
+      # --shared folder: the deploy never protected one from --delete (only .env, which is carried over).
+      # Roll back by hand on the server: bash api/bin/ops/atomic-switch.sh --rollback --live=<root>/api
+      - name: Switch the API to the new release (atomic)
+        timeout-minutes: 5
+        env:
+          REMOTE_ROOT: ${{ secrets.PROD_SSH_REMOTE_ROOT }}
+          DEPLOY_ENV: production
+          REVISION: ${{ github.sha }}
+          CHECK_URL: https://voice.aicountly.com/api/health
+        run: |
+          set +e -uo pipefail
+          root="${REMOTE_ROOT#\~/}"
+          stage=".aicountly-deploy/voice-${DEPLOY_ENV}/stage"
+          ssh deploy-target "rm -f $(printf '%q' "$stage/.env"); bash $(printf '%q' "$stage/bin/ops/atomic-switch.sh") --src=$(printf '%q' "$stage") --live=$(printf '%q' "${root%/}/api") --revision=$(printf '%q' "$REVISION") --check-url=$(printf '%q' "$CHECK_URL")" 2>&1 | tee "$RUNNER_TEMP/switch.out"
+          rc=${PIPESTATUS[0]}
+          case "$rc" in
+            0)  echo "- API: release ${REVISION:0:7} is live (atomic switch)" >> "$GITHUB_STEP_SUMMARY" ;;
+            21) echo "::error title=New release failed its check::${CHECK_URL} did not answer 2xx/3xx after the switch, so the previous code was put back (see the log above). Users kept the previous API. If this was the first (converting) run, the host may not serve api/ through a symlink."; exit 1 ;;
+            22) echo "::error title=API DOWN - act now::The new release failed its check AND the previous code could not be restored. On the server: bash ${root}/api/bin/ops/atomic-switch.sh --status --live=${root}/api, then --rollback."; exit 1 ;;
+            11) echo "::error title=No live api/.env::atomic-switch.sh found no api/.env to carry over. On a first deploy create api/.env from server-php/.env.example on the server, then re-run."; exit 1 ;;
+            *)  echo "::error title=Switch failed::atomic-switch.sh exited ${rc}; the previous code is still live (see the log above)."; exit 1 ;;
+          esac
 
       # --------------------------------------------------------------------
       # Scheduled jobs (E8-OPS F160 — a README cron is not a worker)
@@ -492,6 +540,15 @@ jobs:
             exit 1
           fi
 
+      # The migration step copies the live api/.env into the stage; never leave it there.
+      - name: Remove the stage's copy of .env
+        if: always()
+        env:
+          DEPLOY_ENV: production
+        run: |
+          [ -f ~/.ssh/config ] || exit 0
+          ssh deploy-target "rm -f .aicountly-deploy/voice-${DEPLOY_ENV}/stage/.env" || true
+
       - name: Clean up SSH credentials
         if: always()
         run: rm -f ~/.ssh/deploy_key ~/.ssh/deploy_key.pub ~/.ssh/config
@@ -508,7 +565,7 @@ jobs:
             echo "|---|---|"
             echo "| Target | https://voice.aicountly.com |"
             echo "| Web | \`web/dist/\` → document root |"
-            echo "| API | \`server-php/\` → \`api/\` in the document root |"
+            echo "| API | \`server-php/\` → stage → release folder; \`api/\` symlink switched atomically |"
             echo "| Migrations | \`${MIGRATE}\` |"
             echo "| Commit | \`${GITHUB_SHA:0:7}\` |"
             echo "| Ref | \`${GITHUB_REF_NAME}\` |"

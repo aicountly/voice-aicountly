@@ -1,0 +1,155 @@
+# ---------------------------------------------------------------------------
+# Find a support reference ("Ref: ..." on an error the app showed) in the
+# server logs of production or sandbox.
+#
+# MANUAL ONLY and READ-ONLY: it changes nothing on the server. It pipes
+# scripts/ops/find-ref.sh (canonical copy: console-react-app
+# ops/estate/kit/scripts/ops/find-ref.sh) over SSH, which greps the API's log
+# files modified in the last <days> days for the ref and prints the matching
+# lines with what follows them, e-mail addresses and secrets masked. The output
+# goes to this job's log only. SSH is set up exactly as verify-live.yml does it
+# (same secrets, host-key pinning, user).
+# ---------------------------------------------------------------------------
+name: Find a support reference
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: The reference the user saw (the text after "Ref:")
+        type: string
+        required: true
+      environment:
+        description: Where to look
+        type: choice
+        options:
+          - production
+          - sandbox
+        default: production
+      days:
+        description: Log files modified in the last N days (1-31)
+        type: string
+        default: '7'
+
+permissions:
+  contents: read
+
+jobs:
+  find:
+    name: Find ${{ inputs.ref }} (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # The same SSH setup as the deploy workflow for this environment.
+      - name: Configure SSH
+        env:
+          TARGET: ${{ inputs.environment }}
+          SSH_PRIVATE_KEY: ${{ inputs.environment == 'production' && secrets.PROD_SSH_PRIVATE_KEY || secrets.SANDBOX_SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ inputs.environment == 'production' && secrets.PROD_SSH_HOST || secrets.SANDBOX_SSH_HOST }}
+          SSH_USER: ${{ inputs.environment == 'production' && secrets.PROD_SSH_USER || secrets.SANDBOX_SSH_USER }}
+          # The port is optional (default 22). The default sits inside each
+          # branch, so an unset production port cannot fall through to the
+          # sandbox one.
+          SSH_PORT: ${{ inputs.environment == 'production' && (secrets.PROD_SSH_PORT || '22') || (secrets.SANDBOX_SSH_PORT || '22') }}
+        run: |
+          if [ "$TARGET" = production ]; then p=PROD; else p=SANDBOX; fi
+          missing=""
+          [ -n "$SSH_HOST" ]        || missing="$missing ${p}_SSH_HOST"
+          [ -n "$SSH_USER" ]        || missing="$missing ${p}_SSH_USER"
+          [ -n "$SSH_PRIVATE_KEY" ] || missing="$missing ${p}_SSH_PRIVATE_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing or empty required secret(s):$missing"
+            exit 1
+          fi
+
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          sed -i 's/\r$//' ~/.ssh/deploy_key
+          if ! ssh-keygen -y -f ~/.ssh/deploy_key > /dev/null 2>&1; then
+            echo "::error::${p}_SSH_PRIVATE_KEY is not a usable OpenSSH private key."
+            exit 1
+          fi
+
+          # Pin the host key so the check fails closed rather than trusting
+          # whatever answers on that address.
+          if ! ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/tmp/keyscan.err; then
+            echo "::error::ssh-keyscan could not reach the host on the configured port."
+            sed 's/^/    /' /tmp/keyscan.err
+            exit 1
+          fi
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "::error::The host returned no SSH host key. Check ${p}_SSH_HOST and ${p}_SSH_PORT."
+            exit 1
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+          # Older cPanel hosts offer only RSA with SHA-1, hence the +ssh-rsa.
+          cat > ~/.ssh/config <<CFG
+          Host deploy-target
+            HostName $SSH_HOST
+            User $SSH_USER
+            Port $SSH_PORT
+            IdentityFile ~/.ssh/deploy_key
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            PubkeyAcceptedAlgorithms +ssh-rsa
+            HostKeyAlgorithms +ssh-rsa
+            BatchMode yes
+          CFG
+          chmod 600 ~/.ssh/config
+
+      - name: Find the reference in the server logs
+        env:
+          REF: ${{ inputs.ref }}
+          DAYS: ${{ inputs.days }}
+          REMOTE_ROOT: ${{ inputs.environment == 'production' && secrets.PROD_SSH_REMOTE_ROOT || secrets.SANDBOX_SSH_REMOTE_ROOT }}
+        run: |
+          set -uo pipefail
+          # Checked here, before any SSH: the ref goes into the remote command line.
+          if ! [[ "$REF" =~ ^[A-Za-z0-9._-]{6,64}$ ]]; then
+            echo "::error::The ref must be 6-64 characters of letters, digits, '.', '_' or '-' (what the app shows after 'Ref:')."
+            exit 1
+          fi
+          case "$DAYS" in '' | *[!0-9]*) DAYS=7 ;; esac
+          if [ -z "$REMOTE_ROOT" ]; then
+            echo "::error::The deploy workflow's REMOTE_ROOT secret for this environment is empty."
+            exit 1
+          fi
+          # The folders that hold the API's logs, as the deploy workflow lays them out: the API folder
+          # <document root>/api (a remote root of ~/public_html is public_html: ssh starts in the home
+          # directory). Once deploys are atomic, api/ is a symlink to the current release and every
+          # release (older ones keep the error_log of the requests they served) and shared/ live under
+          # ~/aicountly-releases/<document root>-api, which is searched instead. Read-only.
+          root="${REMOTE_ROOT#\~/}"
+          dirs="$(ssh deploy-target "root=$(printf '%q' "${root%/}") bash -s" <<'SH'
+          case "$root" in /*) r="$root" ;; *) r="$HOME/$root" ;; esac
+          r="$(cd "$r" 2>/dev/null && pwd)" || { echo "no folder $root" >&2; exit 1; }
+          rel="$HOME/aicountly-releases/$(basename "$r")-api"
+          if [ -L "$r/api" ] && [ -d "$rel" ]; then
+            echo "$rel"
+          else
+            echo "$r/api"
+            if [ -d "$rel/shared" ]; then echo "$rel/shared"; fi
+          fi
+          SH
+          )" || { echo "::error::Could not resolve the API folder on the server."; exit 1; }
+          list=""
+          for d in $dirs; do
+            [[ "$d" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo "::error::Unexpected folder name from the server: $d"; exit 1; }
+            list="$list '$d'"
+          done
+          echo "Searching:$list"
+          ssh deploy-target "bash -s -- '$REF' '$DAYS'$list" < scripts/ops/find-ref.sh
+          rc=$?
+          if [ "$rc" = 1 ]; then echo "::notice::No log line carries ${REF} in the last ${DAYS} days."; exit 0; fi
+          exit "$rc"
+
+      - name: Clean up SSH credentials
+        if: always()
+        run: rm -f ~/.ssh/deploy_key ~/.ssh/config

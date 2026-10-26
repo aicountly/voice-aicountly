@@ -126,3 +126,11 @@ env -u DB_NAME -u DB_USER -u DB_PASS php "$ROOT/tests/e8id_messaging_contract.ph
 # the allowlist against web/src/company-access/companyRegistryClient.ts, the refusals, and real HTTP
 # through index.php against a fake Manage (headers, body, status, 504 when Manage does not answer).
 MANAGE_RELAY_API_PORT="${MANAGE_RELAY_API_PORT:-$((STUB_PORT+50))}" php "$ROOT/tests/manage_relay.php"
+
+# Atomic deploys (bin/ops/atomic-switch.sh): the real index.php across two releases — a worker that opened the
+# previous release's copy is handed to the current one without a "Cannot redeclare" fatal error. No database.
+bash "$ROOT/tests/atomic-entry-test.sh"
+
+# No blank errors: an uncaught error answers JSON with a message, a code and the reference (the caller's
+# X-Request-Id), and the same reference is in the log line with the exception. No database.
+bash "$ROOT/tests/error-reference-test.sh"
