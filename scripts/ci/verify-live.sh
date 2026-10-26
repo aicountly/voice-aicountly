@@ -85,7 +85,8 @@ if [ "$force_server" = 1 ] && [ -z "$ssh_prefix" ]; then
   echo "::error title=Post-deploy check::${label}: VERIFY_FORCE_SERVER=1 needs VERIFY_SSH" >&2
   exit 2
 fi
-splash='request is being verified|<title>One moment, please'
+# Imunify360's "Access denied by Imunify360 bot-protection" (HTTP 403) is the same kind of page: ask the server.
+splash='request is being verified|<title>One moment, please|Access denied by Imunify360'
 range="" # absent: never fetch more of a file than it takes to judge it
 [ "$mode" = absent ] && range=0-65535
 tmp="$(mktemp -d)"

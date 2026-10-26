@@ -134,7 +134,8 @@ jobs:
           if [ -L "$r/api" ] && [ -d "$rel" ]; then
             echo "$rel"
           else
-            echo "$r/api"
+            # With a trailing slash: find does not descend into a symlink named without one.
+            echo "$r/api/"
             if [ -d "$rel/shared" ]; then echo "$rel/shared"; fi
           fi
           SH

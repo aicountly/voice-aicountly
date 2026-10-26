@@ -11,7 +11,8 @@
 # logs, boot-*.log), with the lines that follow (a stack trace), newest files first.
 #
 #  - read-only: grep over log files modified in the last <days> (default 7, at most 31)
-#  - the ref must be 6-64 characters of [A-Za-z0-9._-]; folders must be absolute and under $HOME
+#  - the ref must be 6-64 characters of [A-Za-z0-9._-]; folders must be absolute and under $HOME (a folder
+#    given as a symlink, such as the atomic api/, is searched where it points, which must be under $HOME too)
 #  - output capped (MAX_LINES, default 400); e-mail addresses, bearer/session tokens, JWTs and
 #    password/secret/key values are masked before anything is printed
 set -uo pipefail
@@ -34,11 +35,16 @@ mask() {
 }
 
 files=()
+home_real="$(cd "$HOME" 2>/dev/null && pwd -P)" || home_real="$HOME"
 for dir in "$@"; do
   case "$dir" in "$HOME"/* | "$HOME") ;; *) echo "find-ref: skipping $dir (not under the account's home)"; continue ;; esac
   [ -d "$dir" ] || { echo "find-ref: no folder $dir"; continue; }
+  # Searched where it really is: find does not descend into a folder given as a symlink (the atomic api/ ->
+  # its current release), and a folder that resolves outside the account's home is not read.
+  real="$(cd "$dir" 2>/dev/null && pwd -P)" || { echo "find-ref: cannot enter $dir"; continue; }
+  case "$real" in "$home_real"/* | "$home_real") ;; *) echo "find-ref: skipping $dir (resolves outside the account's home)"; continue ;; esac
   while IFS= read -r -d '' f; do files+=("$f"); done < <(
-    find "$dir" -maxdepth 5 -type f \( -name '*.log' -o -name '*.log.[0-9]*' -o -name 'error_log' -o -name '*error*.log' -o -name '*.log.gz' \) \
+    find "$real" -maxdepth 5 -type f \( -name '*.log' -o -name '*.log.[0-9]*' -o -name 'error_log' -o -name '*error*.log' -o -name '*.log.gz' \) \
       -mtime "-$days" -size -512M -print0 2>/dev/null)
 done
 if [ "${#files[@]}" = 0 ]; then echo "find-ref: no log files modified in the last $days days in: $*"; exit 1; fi
