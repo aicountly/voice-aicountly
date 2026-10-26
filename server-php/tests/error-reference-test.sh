@@ -51,8 +51,8 @@ rid="webprobe$(date +%s)abc"
 code="$(curl -s -m 20 -D "$WORK/h1" -o "$WORK/b1" -w '%{http_code}' -H "X-Request-Id: $rid" -H 'X-Test-Throw: one' "$URL")"
 [ "$code" = 500 ] && ok "an uncaught error answers 500" || no "status $code"
 php -r 'exit(is_array(json_decode((string) file_get_contents($argv[1]), true)) ? 0 : 1);' "$WORK/b1" && ok "the body is JSON" || { no "the body is not JSON: $(head -c 300 "$WORK/b1")"; }
-grep -q "\"request_id\":\"$rid\"" "$WORK/b1" && ok "the body carries the caller's X-Request-Id as request_id" || no "no request_id $rid in: $(head -c 400 "$WORK/b1")"
-grep -q '"message":"[^"]' "$WORK/b1" && grep -q '"code":"[a-z_]' "$WORK/b1" && ok "the body has a message and a code" || no "no message/code: $(head -c 400 "$WORK/b1")"
+grep -qE "\"(request_id|correlation_id)\":\"$rid\"" "$WORK/b1" && ok "the body carries the caller's X-Request-Id as its reference (request_id / correlation_id)" || no "no request_id $rid in: $(head -c 400 "$WORK/b1")"
+grep -q '"message":"[^"]' "$WORK/b1" && grep -qE '"code":"[A-Za-z_]' "$WORK/b1" && ok "the body has a message and a code" || no "no message/code: $(head -c 400 "$WORK/b1")"
 grep -q 'probe-internal-detail' "$WORK/b1" && no "the exception text reached the body" || ok "the exception text is not in the body"
 tr -d '\r' < "$WORK/h1" | grep -qi "^X-Request-Id: $rid\$" && ok "the X-Request-Id header names the same reference" || no "no X-Request-Id header"
 sleep 0.3
@@ -60,15 +60,20 @@ line="$(logs | grep -F -- "$rid" | head -n 1)"
 if [ -n "$line" ]; then
   ok "the server log has the reference"
   case "$line" in *RuntimeException*probe-internal-detail-one*) ok "the log line has the exception class and message" ;; *) no "log line lacks class/message: $line" ;; esac
-  case "$line" in *index.php:[0-9]*) ok "the log line has file:line" ;; *) no "log line lacks file:line: $line" ;; esac
-  case "$line" in *GET\ /api/v1/error-reference-probe*) ok "the log line has the method and path" ;; *) no "log line lacks method+path: $line" ;; esac
+  case "$line" in *index.php:[0-9]* | *'index.php","line":'[0-9]*) ok "the log line has file:line" ;; *) no "log line lacks file:line: $line" ;; esac
+  # The method and the path, or (where the product logs the route PATTERN instead of a path that can carry a
+  # token) the method and the route field.
+  case "$line" in
+    *GET\ /api/v1/error-reference-probe* | *'"method":"GET"'*'"route":'* | *'"path":"v1/error-reference-probe","method":"GET"'*) ok "the log line has the method and the path (or route)" ;;
+    *) no "log line lacks method+path: $line" ;;
+  esac
 else
   no "the reference $rid is in no log line"; logs | tail -n 5
 fi
 
 # 2. An implausible id is not trusted: a generated 32-hex one, the same in body and log.
 curl -s -m 20 -o "$WORK/b2" -H 'X-Request-Id: bad id!' -H 'X-Test-Throw: two' "$URL" > /dev/null
-gen="$(sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p' "$WORK/b2" | head -n 1)"
+gen="$(sed -nE 's/.*"(request_id|correlation_id)":"([^"]*)".*/\2/p' "$WORK/b2" | head -n 1)"
 [[ "$gen" =~ ^[0-9a-f]{32}$ ]] && ok "an implausible X-Request-Id gets a generated 32-hex reference" || no "generated reference: '$gen'"
 sleep 0.3
 [ -n "$gen" ] && logs | grep -F -- "$gen" | grep -q 'probe-internal-detail-two' && ok "the generated reference is in the log line" || no "generated reference not logged"
