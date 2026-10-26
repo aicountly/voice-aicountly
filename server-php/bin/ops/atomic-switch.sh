@@ -112,8 +112,14 @@ if [ "$mode" = status ]; then
   exit 0
 fi
 
-# Releases oldest first (their names start with a sortable UTC time).
-release_names() { [ -d "$releases" ] && ls -1 "$releases" | LC_ALL=C sort; }
+# Releases oldest first (their names start with a sortable UTC time). A conversion names the old plain folder
+# <stamp>-pre-atomic and the first release <stamp>-<revision> with the SAME stamp, and a revision ("b9ea…") sorts
+# before "pre-atomic" by name: the pre-atomic folder is ordered as "<stamp>-", before every release of its stamp,
+# or --rollback right after a conversion would find nothing earlier and a later one would skip a release.
+release_names() {
+  [ -d "$releases" ] || return 0
+  ls -1 "$releases" | awk '{ k = $0; sub(/-pre-atomic$/, "-", k); print k "\t" $0 }' | LC_ALL=C sort | cut -f2
+}
 
 # When a release stopped being live (releases_dir/.retired/<name> holds the time). PHP's realpath cache
 # keeps resolving api/ to the release it last saw for up to ~2 minutes, so a worker may still be reading
