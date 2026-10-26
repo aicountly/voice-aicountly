@@ -19,6 +19,9 @@ SWITCH="$API/bin/ops/atomic-switch.sh"
 PORT="${PORT:-$((34000 + RANDOM % 2000))}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/atomic-entry.XXXXXX")"
 export HOME="$WORK/home"
+# The first conversion swaps the plain folder's own code in first and waits before the new release goes
+# live (atomic-switch.sh, ATOMIC_SWITCH_CONVERT_WAIT, 130 s on a server); a test does not need to wait.
+export ATOMIC_SWITCH_CONVERT_WAIT="${ATOMIC_SWITCH_CONVERT_WAIT:-2}"
 DOC="$HOME/public_html/site.example"
 pass=0 fail=0
 ok() { echo "PASS $*"; pass=$((pass + 1)); }
