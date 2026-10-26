@@ -384,8 +384,10 @@ jobs:
                 if [ -x "$c" ] && "$c" -m 2>/dev/null | grep -qx pdo_pgsql; then php="$c"; break; fi
               done
               if [ -z "$php" ]; then echo "no PHP CLI with pdo_pgsql found (ea-php84/83/82, /usr/local/bin/php)"; exit 3; fi
+              # Both paths are relative to the home directory (where ssh starts): copy before the cd.
+              [ -d "$stage" ] || { echo "no stage folder at $stage"; exit 3; }
+              if [ -f "$api/.env" ]; then (umask 077; cp -p "$api/.env" "$stage/.env") || { echo "could not copy $api/.env into the stage"; exit 3; }; fi
               cd "$stage" || { echo "no stage folder at $stage"; exit 3; }
-              if [ -f "$api/.env" ]; then (umask 077; cp -p "$api/.env" .env) || { echo "could not copy $api/.env into the stage"; exit 3; }; fi
               echo "[$php bin/migrate.php${opt:+ $opt}] (in the stage, against the live database)"
               "$php" bin/migrate.php ${opt:+"$opt"} 2>&1'
           }
