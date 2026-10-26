@@ -15,12 +15,15 @@
  *    surest way to get that right everywhere is to never leave it to the
  *    caller.
  *  - The fleet's envelopes: `{data}`, `{data, meta}`, and errors as ApiError.
+ *  - An `X-Request-Id` on every call (./requestId): a 5xx message ends with " (Ref: <id>)", the id the
+ *    API logged the failure under.
  */
 
 import { getApiBaseUrl } from '../config'
 import { ensureSesKey } from '../auth/portal'
 import { noteRestrictedResponse } from './companyRestriction'
 import { PLAN_LIMIT_CODE, notePlanLimit, planLimitFromResponse, planLimitMessage } from './planLimit'
+import { newRequestId, requestIdOf, withRef } from './requestId'
 
 export interface CompanyScope {
   cmp_id: number
@@ -177,9 +180,11 @@ async function send<T>(path: string, options: RequestOptions = {}, isRetry = fal
     throw new ApiError(401, 'unauthorized', err instanceof Error ? err.message : 'Sign in again to continue.')
   }
 
+  const requestId = newRequestId()
   const headers: Record<string, string> = {
     Accept: 'application/json',
     Authorization: `Bearer ${sesKey}`,
+    'X-Request-Id': requestId,
   }
 
   let payload: string | undefined
@@ -247,7 +252,7 @@ async function send<T>(path: string, options: RequestOptions = {}, isRetry = fal
     throw new ApiError(
       response.status,
       envelope.error?.code ?? 'error',
-      envelope.error?.message ?? envelope.message ?? `Request failed (${response.status}).`,
+      withRef(response.status, envelope.error?.message ?? envelope.message, requestIdOf(requestId, response.headers, parsed)),
       envelope.error?.details ?? {},
     )
   }
@@ -308,26 +313,29 @@ export async function downloadFile(
     throw new ApiError(401, 'unauthorized', err instanceof Error ? err.message : 'Sign in again to continue.')
   }
 
+  const requestId = newRequestId()
   let response: Response
   try {
     response = await fetch(buildUrl(path, params, true), {
-      headers: { Accept: 'text/csv', Authorization: `Bearer ${sesKey}` },
+      headers: { Accept: 'text/csv', Authorization: `Bearer ${sesKey}`, 'X-Request-Id': requestId },
     })
   } catch {
     throw new ApiError(0, 'network_error', 'Could not reach the Voice service. Check your connection.')
   }
 
   if (!response.ok) {
-    let message = `Request failed (${response.status}).`
+    let message: string | undefined
     let code = 'error'
+    let parsed: unknown = null
     try {
-      const parsed = (await response.json()) as { error?: { code?: string; message?: string } }
-      message = parsed.error?.message ?? message
-      code = parsed.error?.code ?? code
+      parsed = await response.json()
+      const envelope = parsed as { error?: { code?: string; message?: string } }
+      message = envelope?.error?.message
+      code = envelope?.error?.code ?? code
     } catch {
       // not JSON; keep the generic message
     }
-    throw new ApiError(response.status, code, message)
+    throw new ApiError(response.status, code, withRef(response.status, message, requestIdOf(requestId, response.headers, parsed)))
   }
 
   const disposition = response.headers.get('Content-Disposition') ?? ''

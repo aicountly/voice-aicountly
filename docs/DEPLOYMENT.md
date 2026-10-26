@@ -36,7 +36,7 @@ Production and sandbox are genuinely separate targets — different SSH
 credentials, different servers — so each gets its own workflow. Within one
 environment, though, the web build and the API are deployed by the same run,
 one after the other: first `web/dist/` to the document root, then
-`server-php/` to `api/` inside it. Splitting those into separate workflows
+`server-php/` to `api/` inside it (atomically, see below). Splitting those into separate workflows
 would only mean clicking twice for something that is always meant to happen
 together, with two SSH sessions and two sets of runner setup instead of one.
 
@@ -44,16 +44,36 @@ together, with two SSH sessions and two sets of runner setup instead of one.
 
 The web deploy step runs `rsync --delete` against the document root, which
 would otherwise remove everything not in the build — including `api/`, since
-the API lives inside the document root. That step therefore excludes `api/`
+the API lives inside the document root. That step therefore excludes `/api`
 explicitly. **Removing that exclude would delete the entire backend on the
-next deploy.**
+next deploy.** It must stay `/api`, never `api/`: `api` is a symlink (below),
+and a pattern with a trailing slash matches real directories only, so
+`--delete` would remove the symlink.
+
+### Atomic API deploys
+
+The API is never rsynced into `api/` (that replaced files under requests that
+were running, which then died with an empty 500). The workflow uploads
+`server-php/` to `~/.aicountly-deploy/voice-<env>/stage/`, runs the migrations
+from there against the live database (the live `api/.env` copied in for the
+duration), and then runs `bin/ops/atomic-switch.sh` (canonical copy:
+console-react-app `ops/estate/kit`). It builds a complete release under
+`~/aicountly-releases/<document root>-api/releases/`, carries the live `.env`
+over, and points `api` at it with one rename. `/api/health` must then answer
+2xx/3xx, or the previous code is put back at once. The first run converts the
+plain folder, which is kept as `releases/<time>-pre-atomic`. On the server,
+`bash api/bin/ops/atomic-switch.sh --status --live=<root>/api` lists the
+releases and `--rollback` puts the previous one back. `index.php` starts with
+the atomic entry guard. Its functions are declared conditionally, so the guard
+can hand a request to the current release's copy
+(`server-php/tests/atomic-entry-test.sh`).
 
 ### Why the API's .env survives the API deploy step
 
-The API deploy step also runs `rsync --delete`, this time against `api/`. The
-API's `.env` is created once by hand on the server and exists nowhere else, so
-both `--exclude='.env'` and `--exclude='.env.*'` are what keep it alive.
-Removing them would wipe the live configuration on the next deploy.
+The API's `.env` is created once by hand on the server (in `api/`) and exists
+nowhere else. It is never uploaded (`--exclude='.env'` and `--exclude='.env.*'`
+on the stage upload), and each release gets a copy of the live one, so an edit
+made on the server is carried into the next release.
 
 Neither `.env` is ever uploaded either: `.gitignore` keeps them out of the
 repository, and the workflow fails the build outright if a committed `.env`

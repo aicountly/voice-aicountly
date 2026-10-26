@@ -23,6 +23,8 @@ final class Http
 
     private static ?string $raw = null;
 
+    private static ?string $requestId = null;
+
     /**
      * Send the response and stop.
      *
@@ -68,6 +70,41 @@ final class Http
         self::json($status, [
             'error'   => ['code' => $code, 'message' => $message, 'details' => $details],
             'message' => $message,
+        ]);
+    }
+
+    /**
+     * The reference this request is logged under: the caller's X-Request-Id when it is a plausible id
+     * (6-64 of [A-Za-z0-9._-], what the web app sends), else a fresh 32-hex one. One per request.
+     */
+    public static function requestId(): string
+    {
+        if (self::$requestId !== null) {
+            return self::$requestId;
+        }
+        $sent = self::header('X-Request-Id');
+
+        return self::$requestId = preg_match('/^[A-Za-z0-9._-]{6,64}$/', $sent) === 1 ? $sent : bin2hex(random_bytes(16));
+    }
+
+    /**
+     * An error nothing else handled: one log line with the reference, the exception's class, message
+     * and file:line and the method and path; the caller gets a message, a code and the SAME reference
+     * (body and X-Request-Id header) — never the exception's text.
+     */
+    public static function uncaught(\Throwable $e, int $status, string $code, string $message, string $logPrefix): never
+    {
+        $rid = self::requestId();
+        $path = (string) (parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH) ?: '');
+        error_log(sprintf('%s [%s] %s %s %s: %s at %s:%d', $logPrefix, $rid, self::method(), $path, $e::class, $e->getMessage(), $e->getFile(), $e->getLine()));
+        if (PHP_SAPI !== 'cli' && !headers_sent()) {
+            header('X-Request-Id: ' . $rid);
+        }
+        $message = rtrim($message) . ' If it keeps failing, quote reference ' . $rid . '.';
+        self::json($status, [
+            'error'      => ['code' => $code, 'message' => $message, 'details' => ['request_id' => $rid]],
+            'message'    => $message,
+            'request_id' => $rid,
         ]);
     }
 
