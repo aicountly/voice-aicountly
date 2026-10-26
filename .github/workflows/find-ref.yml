@@ -145,8 +145,9 @@ jobs:
             list="$list '$d'"
           done
           echo "Searching:$list"
-          ssh deploy-target "bash -s -- '$REF' '$DAYS'$list" < scripts/ops/find-ref.sh
-          rc=$?
+          # The default shell runs with -e: keep find-ref.sh's exit code (1 = nothing found) for the check below.
+          rc=0
+          ssh deploy-target "bash -s -- '$REF' '$DAYS'$list" < scripts/ops/find-ref.sh || rc=$?
           if [ "$rc" = 1 ]; then echo "::notice::No log line carries ${REF} in the last ${DAYS} days."; exit 0; fi
           exit "$rc"
 
