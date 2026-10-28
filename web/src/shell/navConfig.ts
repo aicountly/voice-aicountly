@@ -67,6 +67,15 @@ export const NAV: NavItem[] = [
   { to: '/users-access', label: 'Users & Access', icon: UserCog },
 ]
 
+/**
+ * A page's generic label, for analytics: the route's name from the navigation
+ * above. Undefined for anything else, which analytics reports under the
+ * product name.
+ */
+export function pageLabel(pathname: string): string | undefined {
+  return NAV.find((item) => item.to === pathname || `${item.to}/` === pathname)?.label
+}
+
 /** Nav items this user can actually use. */
 export function visibleNav(
   can: (permission: string) => boolean,
