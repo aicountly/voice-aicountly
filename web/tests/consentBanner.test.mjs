@@ -18,6 +18,7 @@ import assert from 'node:assert/strict'
 import { createServer } from 'vite'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { readFileSync } from 'node:fs'
 
 const GA_ID = 'G-TEST000000'
 const TEXT =
@@ -99,4 +100,9 @@ test('not shown when a choice was made in another AICOUNTLY app', () => {
 test('not shown while the address still holds the sign-in hand-off', () => {
   location.href = 'https://voice.aicountly.com/auth/callback?auth_token=DUMMYTOKEN'
   assert.equal(render(), '')
+})
+
+test('never printed', () => {
+  const css = readFileSync(new URL('../src/components/AnalyticsConsentBanner.css', import.meta.url), 'utf8')
+  assert.match(css, /@media print \{\s*\.aic-consent \{\s*display: none !important;/)
 })
