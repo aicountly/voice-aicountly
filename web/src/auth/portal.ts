@@ -399,10 +399,23 @@ async function requestSesKey(path: string): Promise<string> {
 let mintInFlight: Promise<string> | null = null
 
 /**
- * A valid ses_key, minting one from the auth_token when needed.
+ * A new ses_key, sharing a mint already in flight. It replaces the held key
+ * only once it arrives.
  *
  * Concurrent callers share one request: a burst of API calls on a cold session
  * would otherwise mint a handful of keys and keep only the last.
+ */
+function mintSesKey(): Promise<string> {
+  if (!mintInFlight) {
+    mintInFlight = requestSesKey('/seskey').finally(() => {
+      mintInFlight = null
+    })
+  }
+  return mintInFlight
+}
+
+/**
+ * A valid ses_key, minting one from the auth_token when needed.
  *
  * There is no refresh path here on purpose. The key lives in memory and
  * `getSesKey()` returns null once it expires, so the next call simply mints a
@@ -414,12 +427,28 @@ export async function ensureSesKey(): Promise<string> {
   const existing = getSesKey()
   if (existing) return existing
 
-  if (!mintInFlight) {
-    mintInFlight = requestSesKey('/seskey').finally(() => {
-      mintInFlight = null
-    })
+  return mintSesKey()
+}
+
+/**
+ * The ses_key for an embedded sibling widget (AICOUNTLY Connect), on the
+ * widget's terms (connect-aicountly docs/EMBED_SDK.md, "Session and auth"):
+ *
+ *  - `forceRefresh` false: the key this app already holds, minted from the
+ *    auth_token when there is none (the same shared mint the API client uses);
+ *  - `forceRefresh` true: a new key minted (the widget asks after Connect
+ *    answered 401). The held key stays in place until the new one arrives, so
+ *    a refused or failed refresh leaves Voice's own session as it was;
+ *  - signed out, signing out, or a mint that failed: null. Never throws, and
+ *    never sends anybody to the portal — signing in is this app's business.
+ */
+export async function sesKeyForEmbed(forceRefresh = false): Promise<string | null> {
+  if (isLogoutInProgress() || !getAuthToken()) return null
+  try {
+    return await (forceRefresh === true ? mintSesKey() : ensureSesKey())
+  } catch {
+    return null
   }
-  return mintInFlight
 }
 
 // ---------------------------------------------------------------------------

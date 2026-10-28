@@ -4,6 +4,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { useAuth } from './auth/AuthProvider'
 import { VoiceProvider } from './context/VoiceContext'
 import { AppShell } from './shell/AppShell'
+import { ConnectMount } from './connect/ConnectMount'
 import SignIn from './pages/SignIn'
 import { initAnalytics, trackPageView } from './utils/analytics'
 import { LoadingRows } from './ui'
@@ -66,6 +67,8 @@ export default function App() {
     <BrowserRouter>
       <VoiceProvider>
         <RouteTracker />
+        {/* AICOUNTLY Connect: started once, after sign-in, outside the company-keyed outlet. */}
+        <ConnectMount />
         <Routes>
           <Route element={<AppShell />}>
             <Route index element={<CommandCentre />} />

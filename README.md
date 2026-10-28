@@ -392,6 +392,19 @@ bound to the user and company; see `src/StreamTickets.php`.
 
 See [docs/auth/AICOUNTLY_AUTH_WORKFLOW.md](docs/auth/AICOUNTLY_AUTH_WORKFLOW.md).
 
+### AICOUNTLY Connect
+
+Every signed-in page also carries **AICOUNTLY Connect** — the widget every
+AICOUNTLY product mounts: a launcher in the bottom-right corner opens your own
+Connect conversations and calls with colleagues, with **AI Pulse** pinned first,
+scoped to the company and branch you are working in. It is not a customer line:
+Voice's calls, queues and gateway are untouched by it. It is given Voice's own
+`ses_key` through `sesKeyForEmbed()` and is taken down on sign-out. The widget is
+loaded from Connect at run time (`web/src/connect/`, product code `voice`); if
+Connect cannot be reached, Voice is exactly as it was. `VITE_CONNECT_ORIGIN`
+overrides where it is loaded from, and `VITE_CONNECT_ORIGIN=off` leaves it out
+of a build.
+
 ## Design reference
 
 `design-reference/voice/` holds the static HTML/CSS/JS reference that pins the
