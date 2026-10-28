@@ -1,9 +1,10 @@
 import { lazy, useEffect } from 'react'
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 
 import { useAuth } from './auth/AuthProvider'
 import { VoiceProvider } from './context/VoiceContext'
 import { AppShell } from './shell/AppShell'
+import { pageLabel } from './shell/navConfig'
 import { ConnectMount } from './connect/ConnectMount'
 import SignIn from './pages/SignIn'
 import { initAnalytics, trackPageView } from './utils/analytics'
@@ -103,9 +104,14 @@ export default function App() {
   )
 }
 
+/**
+ * A GA4 page view on every navigation, not only the first. The title is the
+ * route's own label (never a caller's or contact's name), or the product name.
+ */
 function RouteTracker() {
+  const { pathname } = useLocation()
   useEffect(() => {
-    trackPageView(window.location.pathname, document.title)
-  }, [])
+    trackPageView(pathname, pageLabel(pathname))
+  }, [pathname])
   return null
 }

@@ -23,6 +23,7 @@ import { visibleNav } from './navConfig'
 import { accessStatusLabel } from '../company-access/index.ts'
 import { BrowseCompaniesButton, RestrictedCompanyNotice } from './CompanyDiscovery'
 import { manageProfilePath, openManagePortal } from '../services/appLauncher'
+import { isAnalyticsConfigured, openAnalyticsPreferences } from '../utils/analytics'
 import './app-shell.css'
 import { CompanyRestrictedBanner } from '../components/CompanyRestrictedBanner'
 import { PlanLimitToast } from '../components/PlanLimitToast'
@@ -127,6 +128,11 @@ export function AppShell() {
           >
             {showAdvanced ? 'Simplified view' : 'All settings'}
           </Button>
+          {isAnalyticsConfigured() ? (
+            <button type="button" className="vsidebar__link" onClick={openAnalyticsPreferences}>
+              Analytics preferences
+            </button>
+          ) : null}
           <div className="vsidebar__note" style={{ marginTop: 10 }}>
             Smarter conversations for a brighter business.
             {APP_ENV !== 'production' ? <><br /><strong>{APP_ENV}</strong> environment</> : null}

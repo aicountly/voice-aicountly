@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App.tsx'
 import { AuthProvider } from './auth/AuthProvider.tsx'
+import { AnalyticsConsentBanner } from './components/AnalyticsConsentBanner'
 import { purgeLegacySharedAuthToken } from './auth/sharedAuthCookie'
 import './index.css'
 
@@ -16,5 +17,6 @@ createRoot(rootElement).render(
     <AuthProvider>
       <App />
     </AuthProvider>
+    <AnalyticsConsentBanner />
   </StrictMode>,
 )

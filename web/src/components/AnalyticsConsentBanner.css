@@ -1,0 +1,91 @@
+/*
+ * The analytics consent card: bottom-left, above the page and its sticky top
+ * bar (20), below AICOUNTLY Connect (50), the drawers (60), the skip link (100)
+ * and toasts (1000). Never wider than 360px, and on a phone it leaves at least
+ * 88px on the right for the Connect launcher.
+ */
+.aic-consent {
+  position: fixed;
+  left: 16px;
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  z-index: 45;
+  box-sizing: border-box;
+  width: min(360px, calc(100vw - 104px));
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-lifted);
+  font-family: var(--font);
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+
+.aic-consent__text {
+  margin: 0 0 12px;
+}
+
+.aic-consent__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.aic-consent__button {
+  appearance: none;
+  min-height: 44px;
+  padding: 0 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.aic-consent__button--primary {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+
+.aic-consent__link {
+  color: var(--primary-dark);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/*
+ * In the signed-in shell on a wide screen, the bottom of the sidebar holds
+ * navigation and its own controls (shell/app-shell.css: 244px, 212px up to
+ * 1240px, a top scroller at 900px and below): the card sits at the bottom-left
+ * of the page beside it instead.
+ */
+body:has(.vshell) .aic-consent {
+  left: calc(244px + 16px);
+}
+
+@media (max-width: 1240px) {
+  body:has(.vshell) .aic-consent {
+    left: calc(212px + 16px);
+  }
+}
+
+@media (max-width: 900px) {
+  body:has(.vshell) .aic-consent {
+    left: 16px;
+  }
+}
+
+/*
+ * Narrow screens with Connect mounted: its launcher is a pill about 135px wide,
+ * 16px from the corner, so the card sits just above it instead of beside it.
+ */
+@media (max-width: 640px) {
+  body:has(> #aicountly-chat-root) .aic-consent {
+    bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+  }
+}
