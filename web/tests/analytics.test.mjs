@@ -320,6 +320,19 @@ test('no ads signal is ever granted, whatever is chosen', async () => {
   }
 })
 
+test('every gtag command reaches the dataLayer as an Arguments object, the only form gtag.js runs — never an Array', async () => {
+  const a = await loadAnalytics('/')
+  a.trackPageView('/calls', 'Calls')
+  a.setAnalyticsConsent('granted')
+  a.trackEvent('call_started', { channel: 'web' })
+
+  assert.ok(globalThis.window.dataLayer.length > 6)
+  for (const entry of globalThis.window.dataLayer) {
+    assert.equal(Array.isArray(entry), false)
+    assert.equal(Object.prototype.toString.call(entry), '[object Arguments]')
+  }
+})
+
 test('a build without a measurement id: no tag, no cookie, no banner', async () => {
   const a = await loadAnalytics('/', '', { env: {} })
   assert.equal(a.isAnalyticsConfigured(), false)
