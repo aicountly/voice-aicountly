@@ -1,8 +1,9 @@
 /*
  * The analytics consent card: bottom-left, above the page and its sticky top
- * bar (20), below AICOUNTLY Connect (50), the drawers (60), the skip link (100)
- * and toasts (1000). Never wider than 360px, and on a phone it leaves at least
- * 88px on the right for the Connect launcher.
+ * bar (20, from which nothing opens but the browser's own selects), below
+ * AICOUNTLY Connect (50), the drawers (60), the skip link (100) and toasts
+ * (1000); never printed. Never wider than 360px, and on a phone it leaves at
+ * least 88px on the right for the Connect launcher.
  */
 .aic-consent {
   position: fixed;
@@ -87,5 +88,12 @@ body:has(.vshell) .aic-consent {
 @media (max-width: 640px) {
   body:has(> #aicountly-chat-root) .aic-consent {
     bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* Never on a printed page. */
+@media print {
+  .aic-consent {
+    display: none !important;
   }
 }
