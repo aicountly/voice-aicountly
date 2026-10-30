@@ -213,6 +213,14 @@ final class CallsController extends Controller
             self::fail($result['code'], $result['message']);
         }
 
+        // Estate analytics: Voice's activation and recurring outcome. The DISPOSITION, not the
+        // dial: placing a call is an attempt, and a disposition is a person confirming the call
+        // happened and saying how it went. Keyed on the call, so re-dispositioning is one event.
+        // No number, no transcript, no contact.
+        EstateAnalytics::forContext($ctx, $auth, 'call.completed', [
+            'idempotency_key' => 'voice:call:' . self::id($id),
+        ]);
+
         Http::data(CallService::find($ctx, self::id($id)) ?? []);
     }
 
