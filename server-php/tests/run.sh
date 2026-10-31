@@ -77,6 +77,9 @@ ENVEOF
 
 php "$ROOT/bin/migrate.php" > /dev/null
 
+# php -l does not resolve class names: a class used without its `use` is a 500 only when the line runs.
+php "$ROOT/tests/class_names.php"
+
 # Where the database name and username come from (Console's SaaS Database Details, or DB_NAME / DB_USER) and what is
 # said when they cannot be had: the resolver, /api/health, bin/db-check.php and bin/migrate.php. Needs the migrated
 # database above; the cases that take a migration record away put it back.

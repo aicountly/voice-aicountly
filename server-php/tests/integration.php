@@ -232,6 +232,15 @@ T::group('4. Idempotent call creation');
     );
     T::same(1, $count, 'only one call row exists for that number');
     clearHeaders();
+
+    // The disposition route records the outcome and then reports call.completed to estate
+    // analytics. CallsController named EstateAnalytics without importing it, so every
+    // disposition was saved and then answered 500 (Class "…\Controllers\EstateAnalytics" not found).
+    $callId = (int) ($first['body']['data']['call_id'] ?? 0);
+    $disposed = request('POST', '/v1/calls/' . $callId . '/disposition', ['cmp_id' => (string) CMP], ['disposition' => 'resolved']);
+    T::same(200, $disposed['status'], 'a disposition is answered 200, not a 500 after the save: ' . json_encode($disposed['body']['error'] ?? null));
+    T::same($callId, (int) ($disposed['body']['data']['call_id'] ?? 0), 'with the call it was recorded on');
+    clearHeaders();
 }
 
 // ===========================================================================

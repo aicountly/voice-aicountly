@@ -8,6 +8,7 @@ use Aicountly\Api\Audit;
 use Aicountly\Api\Db;
 use Aicountly\Api\Domain\CallingPolicy;
 use Aicountly\Api\Domain\CallService;
+use Aicountly\Api\EstateAnalytics;
 use Aicountly\Api\Http;
 use Aicountly\Api\Idempotency;
 use Aicountly\Api\Permissions;
