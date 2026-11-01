@@ -1,4 +1,5 @@
 import { StrictMode } from 'react'
+import { initEstateAnalytics } from './analytics/estateAnalytics'
 import { createRoot } from 'react-dom/client'
 import App from './App.tsx'
 import { AuthProvider } from './auth/AuthProvider.tsx'
@@ -14,6 +15,10 @@ purgeLegacySharedAuthToken()
 
 const rootElement = document.getElementById('root')
 if (!rootElement) throw new Error('Root element #root not found')
+
+// Estate analytics (analytics.aicountly.org) — AICOUNTLY's own product/marketing view.
+// A different thing from the GA4 page views; see analytics/estateAnalytics.ts.
+initEstateAnalytics()
 
 createRoot(rootElement).render(
   <StrictMode>

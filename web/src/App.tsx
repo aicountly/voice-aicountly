@@ -1,4 +1,5 @@
 import { lazy, useEffect } from 'react'
+import { recordEstatePage } from './analytics/estateAnalytics'
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom'
 
 import { useAuth } from './auth/AuthProvider'
@@ -112,6 +113,9 @@ function RouteTracker() {
   const { pathname } = useLocation()
   useEffect(() => {
     trackPageView(pathname, pageLabel(pathname))
+    // Estate analytics gets the same route from the same effect, so the two pipelines cannot
+    // drift apart. The SDK masks identifiers out of the path and times the previous route.
+    recordEstatePage(pathname)
   }, [pathname])
   return null
 }
