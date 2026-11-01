@@ -286,7 +286,14 @@ jobs:
           #                  breaks certificate renewal
           #   cgi-bin/     — cPanel-managed, present in every docroot
           #   .git*        — never publish repository metadata
+          # The maintenance flag and its notice are operator state in the document root, not
+          # build output. A --delete deploy would remove them and quietly bring the site back
+          # up in the middle of a window. No rsync here uses --delete-excluded, so an exclude
+          # protects them from deletion as well as from being overwritten.
           rsync -avz --delete \
+            --exclude='.maintenance' \
+            --exclude='.maintenance.json' \
+            --exclude='.maintenance-allow' \
             --exclude='/api' \
             --exclude='.env' \
             --exclude='.env.*' \
@@ -317,7 +324,14 @@ jobs:
           # the cron workers and migrations run them over SSH, and .htaccess 404s them over HTTP.
           stage=".aicountly-deploy/voice-${DEPLOY_ENV}/stage"
           ssh deploy-target "mkdir -p $(printf '%q' "$stage") && chmod 700 .aicountly-deploy"
+          # The maintenance flag and its notice are operator state in the document root, not
+          # build output. A --delete deploy would remove them and quietly bring the site back
+          # up in the middle of a window. No rsync here uses --delete-excluded, so an exclude
+          # protects them from deletion as well as from being overwritten.
           rsync -az --delete \
+            --exclude='.maintenance' \
+            --exclude='.maintenance.json' \
+            --exclude='.maintenance-allow' \
             --exclude='.env' \
             --include='.env.example' \
             --exclude='.env.*' \
