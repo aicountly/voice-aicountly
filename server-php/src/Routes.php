@@ -34,6 +34,11 @@ final class Routes
 {
     public static function register(Router $router): void
     {
+        // --- estate maintenance endpoint: Console switches this site into or out of maintenance (estate kit).
+        // Outside every session and company check, like the Manage receivers above: its
+        // only credential is CONSOLE_CONTROL_KEY, checked inside the handler itself.
+        $router->post('internal/maintenance', [\Aicountly\Api\Ops\MaintenanceEndpoint::class, 'handle']);
+        $router->get('internal/maintenance', [\Aicountly\Api\Ops\MaintenanceEndpoint::class, 'handle']);
         // Estate analytics: the SPA's only destination for behavioural events. No permission is
         // asserted — recording that a screen was opened is not an action a role grants — but a
         // session and a company context verified against Manage are both required, and the
