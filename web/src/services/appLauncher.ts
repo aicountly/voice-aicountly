@@ -239,6 +239,15 @@ export function manageProfilePath(): string {
 }
 
 /**
+ * Manage page for the subscription behind the profile — the second of the two
+ * mandatory links in the suite-wide account menu (`AICOUNTLY_ACCOUNT_MENU.md`,
+ * §5: the person's own details, then the account behind them).
+ */
+export function manageAccountPath(): string {
+  return '/account'
+}
+
+/**
  * A page in Manage, reached the same way the launcher's Manage tile is — the
  * portal's authentication_jump, no credential in the URL — with Manage's
  * callback told where to land (`next`).
