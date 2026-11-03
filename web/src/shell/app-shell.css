@@ -94,8 +94,65 @@
 .vavatar {
   border: 0; border-radius: 50%; width: 38px; height: 38px;
   background: var(--primary-dark); color: #fff; font-weight: 700; font-size: 13px;
-  display: grid; place-items: center; flex-shrink: 0;
+  display: grid; place-items: center; flex-shrink: 0; overflow: hidden;
 }
+/* The profile photo from the portal, when there is one; otherwise the initials show through. */
+.vavatar__photo { width: 100%; height: 100%; object-fit: cover; display: block; }
+.vavatar--sm { width: 26px; height: 26px; font-size: 10px; }
+.vavatar--lg { width: 42px; height: 42px; font-size: 14px; }
+
+/* The suite-wide account menu (AICOUNTLY_ACCOUNT_MENU.md): who you are, the
+   other AICOUNTLY accounts signed in on this browser, the Manage links and
+   sign out. Wide enough for a name above a masked e-mail without wrapping;
+   every row truncates rather than widen the panel, which is what the
+   `min-width: 0` on the text column buys inside a flex row. */
+.vaccount { position: relative; flex-shrink: 0; }
+.vaccount__trigger {
+  display: flex; align-items: center; gap: 4px;
+  border: 0; background: transparent; color: var(--muted); padding: 0;
+}
+.vaccount__menu {
+  position: absolute; right: 0; top: calc(100% + 8px); z-index: 30;
+  width: min(276px, calc(100vw - 32px));
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 16px 40px rgb(6 78 59 / 14%);
+  padding: 4px 0; text-align: left;
+}
+.vaccount__who {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px; border-bottom: 1px solid var(--border);
+}
+.vaccount__who-text { min-width: 0; }
+.vaccount__name {
+  margin: 0; font-size: 13px; font-weight: 700;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.vaccount__meta {
+  margin: 0; font-size: 11px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.vaccount__num { font-variant-numeric: tabular-nums; }
+.vaccount__section { padding: 4px 0; border-bottom: 1px solid var(--border); }
+.vaccount__section:last-child { border-bottom: 0; }
+.vaccount__caption {
+  margin: 0; padding: 6px 12px 2px;
+  font-size: 10px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+  color: var(--muted);
+}
+.vaccount__item {
+  display: flex; align-items: center; gap: 9px;
+  width: 100%; min-height: 38px; padding: 7px 12px;
+  border: 0; background: transparent; color: var(--text);
+  font-size: 13px; text-align: left;
+}
+.vaccount__item:hover { background: #f5f9f6; }
+.vaccount__item--danger { color: var(--danger); }
+.vaccount__item--danger:hover { background: #fdeef0; }
+.vaccount__item-text { flex: 1 1 auto; min-width: 0; }
+.vaccount__item-name, .vaccount__item-meta {
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.vaccount__item-meta { font-size: 11px; color: var(--muted); }
 
 .vbell { position: relative; }
 .vbell__dot {

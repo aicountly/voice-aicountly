@@ -289,3 +289,20 @@ function remember(cmpId: number): void {
     // Private browsing, blocked storage. The app works without it.
   }
 }
+
+/**
+ * Forget the remembered company.
+ *
+ * For switching to another AICOUNTLY account (`auth/accounts.ts`): the number
+ * above belongs to the account that chose it, and the provider reads it before
+ * it has asked Manage anything, so carrying it across would have the next
+ * account's first screen opening a company they have no access to. Not a
+ * sign-out — the tokens are untouched.
+ */
+export function clearRememberedCompany(): void {
+  try {
+    window.localStorage.removeItem(STORAGE_KEY)
+  } catch {
+    // Nothing was stored, then.
+  }
+}

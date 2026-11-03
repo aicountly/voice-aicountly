@@ -13,16 +13,16 @@
 
 import { Suspense, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { Bell, LogOut, PhoneCall, Search, Settings2, UserCog } from 'lucide-react'
+import { Bell, PhoneCall, Search, Settings2 } from 'lucide-react'
 
 import { useAuth } from '../auth/AuthProvider'
 import { useVoice } from '../context/VoiceContext'
 import { APP_ENV } from '../config'
 import { Badge, Button, EmptyState, LoadingRows, Notice } from '../ui'
+import { AccountMenu } from './AccountMenu'
 import { visibleNav } from './navConfig'
 import { accessStatusLabel } from '../company-access/index.ts'
 import { BrowseCompaniesButton, RestrictedCompanyNotice } from './CompanyDiscovery'
-import { manageProfilePath, openManagePortal } from '../services/appLauncher'
 import { isAnalyticsConfigured, openAnalyticsPreferences } from '../utils/analytics'
 import './app-shell.css'
 import { CompanyRestrictedBanner } from '../components/CompanyRestrictedBanner'
@@ -197,16 +197,13 @@ export function AppShell() {
           </form>
 
           <Button variant="ghost" className="vbell" title="Notifications" aria-label="Notifications" icon={Bell} />
-          <Button
-            variant="ghost"
-            onClick={() => openManagePortal(manageProfilePath())}
-            icon={UserCog}
-            title="Manage profile (opens Manage in a new tab)"
-            aria-label="Manage profile (opens in a new tab)"
-          />
-          <Button variant="ghost" onClick={signOut} icon={LogOut} title="Sign out">
-            <span className="sr-only">Sign out</span>
-          </Button>
+          {/*
+            The Manage-profile button and the sign-out button used to sit here
+            on their own. They are now the suite-wide account menu
+            (AICOUNTLY_ACCOUNT_MENU.md), which also lists the other AICOUNTLY
+            accounts signed in on this browser.
+          */}
+          <AccountMenu cmpId={company.cmp_id} />
         </header>
 
         <main id="main" tabIndex={-1} className="vpage">
