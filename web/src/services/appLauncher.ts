@@ -248,6 +248,23 @@ export function manageAccountPath(): string {
 }
 
 /**
+ * Manage pages for the company itself, for the account menu's Company block
+ * (`AICOUNTLY_ACCOUNT_MENU.md` §3).
+ *
+ * Voice does not edit companies or branches — they belong to Aicountly Manage, which is where the
+ * topbar's company directory already sends people. Same paths as Books', because Books is the
+ * menu's reference product.
+ */
+export function manageCompanyEditPath(cmpId: number | string): string {
+  return `/company/${encodeURIComponent(String(cmpId))}/edit`
+}
+
+/** Manage's branch list for one company. */
+export function manageBranchListPath(cmpId: number | string): string {
+  return `/branch/${encodeURIComponent(String(cmpId))}`
+}
+
+/**
  * A page in Manage, reached the same way the launcher's Manage tile is — the
  * portal's authentication_jump, no credential in the URL — with Manage's
  * callback told where to land (`next`).

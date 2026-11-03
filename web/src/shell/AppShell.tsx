@@ -203,7 +203,7 @@ export function AppShell() {
             (AICOUNTLY_ACCOUNT_MENU.md), which also lists the other AICOUNTLY
             accounts signed in on this browser.
           */}
-          <AccountMenu />
+          <AccountMenu cmpId={company.cmp_id} />
         </header>
 
         <main id="main" tabIndex={-1} className="vpage">
