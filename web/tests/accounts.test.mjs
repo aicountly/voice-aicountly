@@ -137,6 +137,7 @@ describe('reading the roster of accounts signed in on this browser', () => {
     assert.deepEqual(roster[0], {
       uuid: 88,
       name: 'Rahul Gupta',
+      fullName: 'Rahul Gupta',
       maskedEmail: 'ra•••@cagupta.in',
       maskedMobile: '+91••••••••78',
       active: true,
