@@ -14,7 +14,7 @@
 # of old and new files (docs: DEPLOY_SAFETY.md in console-react-app
 # ops/estate/kit). No source, no node_modules, and no .env ever reach the server.
 # ---------------------------------------------------------------------------
-name: Deploy to cPanel Production
+name: Deploy to S01 Production
 
 on:
   workflow_dispatch:
@@ -52,6 +52,16 @@ jobs:
       # Owner's rule (2026-10-26): production deploys run 20:00-08:00 IST; in business hours only with
       # the owner's explicit permission, recorded in the job summary (DEPLOY_SAFETY.md §2). Before any
       # build or upload; the reason is passed through env, never interpolated into the script.
+      - name: Verify S01 deployment target
+        id: s01_target
+        env:
+          AIC_S01_TARGETS: '[{"domain":"voice.aicountly.com","account":"voiceaicountly","root":"/home/voiceaicountly/public_html","verified_blueprint":true,"ssh_login":"aicdc41f60e8d4a906f4"}]'
+          AIC_TARGET_PROD_SSH_HOST: ${{ secrets.PROD_SSH_HOST }}
+          AIC_TARGET_PROD_SSH_PORT: ${{ secrets.PROD_SSH_PORT }}
+          AIC_TARGET_PROD_SSH_REMOTE_ROOT: ${{ secrets.PROD_SSH_REMOTE_ROOT }}
+          AIC_TARGET_PROD_SSH_USER: ${{ secrets.PROD_SSH_USER }}
+        run: python3 "$GITHUB_WORKSPACE/.github/scripts/s01-target-guard.py"
+
       - name: Production deploy window (20:00-08:00 IST)
         env:
           BUSINESS_HOURS_REASON: ${{ inputs.business_hours_reason }}
@@ -188,7 +198,7 @@ jobs:
 
           # Pin the host key so deploys fail closed rather than trusting
           # whatever answers on that address.
-          if ! ssh-keyscan -p "${SSH_PORT:-22}" -H "$SSH_HOST" >> ~/.ssh/known_hosts 2>/tmp/keyscan.err; then
+          if ! python3 "$GITHUB_WORKSPACE/.github/scripts/s01-keyscan.py" -p "${SSH_PORT:-9898}" -H "$SSH_HOST" > ~/.ssh/known_hosts 2>/tmp/keyscan.err; then
             echo "::error::ssh-keyscan could not reach the host on the configured port."
             sed 's/^/    /' /tmp/keyscan.err
             exit 1
@@ -207,7 +217,7 @@ jobs:
           Host deploy-target
             HostName $SSH_HOST
             User $SSH_USER
-            Port ${SSH_PORT:-22}
+            Port ${SSH_PORT:-9898}
             IdentityFile ~/.ssh/deploy_key
             IdentitiesOnly yes
             StrictHostKeyChecking yes
@@ -387,7 +397,7 @@ jobs:
           runner() {
             ssh deploy-target "api=${api_q} stage=${stage_q} opt=$(printf '%q' "$1")"'
               php=""
-              for c in /opt/cpanel/ea-php84/root/usr/bin/php /opt/cpanel/ea-php83/root/usr/bin/php /opt/cpanel/ea-php82/root/usr/bin/php /usr/local/bin/php; do
+              for c in /opt/remi/php84/root/usr/bin/php /opt/remi/php83/root/usr/bin/php /opt/remi/php82/root/usr/bin/php /usr/local/bin/php; do
                 if [ -x "$c" ] && "$c" -m 2>/dev/null | grep -qx pdo_pgsql; then php="$c"; break; fi
               done
               if [ -z "$php" ]; then echo "no PHP CLI with pdo_pgsql found (ea-php84/83/82, /usr/local/bin/php)"; exit 3; fi
@@ -493,6 +503,7 @@ jobs:
       # --------------------------------------------------------------------
 
       - name: Scheduled jobs (crontab + Cron Job Monitor key)
+        if: ${{ vars.S01_WEB_ONLY == '0' }}
         env:
           REMOTE_ROOT: ${{ secrets.PROD_SSH_REMOTE_ROOT }}
           CONSOLE_CRON_MONITOR_KEY: ${{ secrets.CONSOLE_CRON_MONITOR_KEY }}
@@ -515,7 +526,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           case "$rc" in
-            0)  echo "Scheduled jobs installed; heartbeats go to Console's Cron Job Monitor." ;;
+            0)  echo "Scheduled-job hook completed; see its output above for installed or deferred status." ;;
             20) echo "::warning::The jobs are installed, but api/.env has no CONSOLE_CRON_MONITOR_KEY and the repo secret is empty — they run without reporting, so Console shows them OVERDUE. Add the CONSOLE_CRON_MONITOR_KEY repository secret and deploy again." ;;
             21) echo "::error::The crontab could not be installed on the host (output above). The release is live; the jobs are not scheduled."; exit 1 ;;
             *)  echo "::error::post-deploy-jobs.sh failed (exit $rc, output above)."; exit 1 ;;
