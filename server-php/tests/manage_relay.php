@@ -45,9 +45,9 @@ $check = static function (string $name, bool $ok, string $detail = '') use (&$pa
 $client = (string) file_get_contents(dirname($root) . '/web/src/company-access/companyRegistryClient.ts');
 // One level of nested generics too (`call<Array<{ key: string }>>('GET', '/v1/applications')`).
 preg_match_all("/call<(?:[^<>]|<[^<>]*>)*>\\('(GET|POST|PUT|PATCH|DELETE)', [`']([^`']+)[`']/", $client, $calls, PREG_SET_ORDER);
-$check('the shared client was read (all 32 calls of company-access 1.4.0)', count($calls) >= 32, (string) count($calls));
+$check('the shared client was read (all 34 calls of company-access 1.7.0)', count($calls) >= 34, (string) count($calls));
 $version = trim((string) file_get_contents(dirname($root) . '/web/src/company-access/VERSION'));
-$check('the vendored company-access is 1.4.0', $version === '1.4.0', $version);
+$check('the vendored company-access is 1.7.0', $version === '1.7.0', $version);
 foreach ($calls as [, $method, $path]) {
     $concrete = preg_replace('/\$\{query\([^}]*\}\)?\}?/', '', $path);
     $concrete = str_replace('${action}', 'accept', (string) $concrete);
@@ -77,6 +77,9 @@ foreach ([
     ['GET', 'v1/workspaces/3/company-users'],
     ['POST', 'v1/workspaces/3/members/1f2e-uuid/move'],
     ['DELETE', 'v1/companies/74/members/1f2e-uuid'],
+    // 1.7.0: Add user finds a person by e-mail / mobile / account ID, and invites them.
+    ['POST', 'v1/companies/74/people/lookup'],
+    ['POST', 'v1/companies/74/people/invite'],
 ] as [$method, $path]) {
     $check("{$method} {$path} is relayed", ManageRelay::isRelayed($method, $path));
 }
@@ -122,6 +125,17 @@ $refused = [
     ['DELETE', 'manage/v1/companies/74/members/%2E%2E', 'an encoded `..` as the person'],
     ['POST', 'manage/v1/workspaces/3/members/..%2F..%2Fbilling/move', 'an encoded slash in a move'],
     ['POST', 'manage/v1/workspaces/3/members/../move', 'a traversal in a move'],
+    // The two 1.7.0 routes are POST only, and nothing wider.
+    ['GET', 'manage/v1/companies/74/people/lookup', 'a look-up is a POST'],
+    ['GET', 'manage/v1/companies/74/people/invite', 'an invitation is a POST'],
+    ['PUT', 'manage/v1/companies/74/people/invite', 'an invitation is a POST, never a PUT'],
+    ['DELETE', 'manage/v1/companies/74/people/invite', 'an invitation is a POST, never a DELETE'],
+    ['GET', 'manage/v1/companies/74/people', 'the people of a company are never listed here'],
+    ['POST', 'manage/v1/companies/74/people', 'a person is looked up or invited, never posted bare'],
+    ['POST', 'manage/v1/companies/74/people/search', 'an unlisted people action'],
+    ['POST', 'manage/v1/companies/74/people/lookup/extra', 'an extra level after a look-up'],
+    ['POST', 'manage/v1/companies/abc/people/invite', 'a company id is a number'],
+    ['POST', 'manage/v1/workspaces/3/people/invite', 'invitations are per company, never per workspace'],
 ];
 foreach ($refused as [$method, $path, $why]) {
     $check("refused: {$method} {$path} ({$why})", ManageRelay::upstreamUrl($method, $path, '', 'https://manage.example') === null);
